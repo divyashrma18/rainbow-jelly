@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Rainbow Jelly</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@1&family=Cormorant:ital@1&family=Space+Grotesk:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root { color-scheme: light; }
+  html, body { margin: 0; padding: 0; width: 100%; height: 100%; background: #f3efe9; overflow: hidden; }
+  #app { position: fixed; inset: 0; }
+  canvas#gpu-canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; }
+  #fallback { display: none; position: fixed; inset: 0; align-items: center; justify-content: center; text-align: center; font-family: 'Space Grotesk', sans-serif; background: #f3efe9; color: #2a2a2a; padding: 2rem; }
+  #fallback.visible { display: flex; }
+  #fallback h1 { font-family: 'Instrument Serif', serif; font-style: italic; font-size: 2.2rem; font-weight: 400; margin-bottom: 0.5rem; }
+</style>
+</head>
+<body>
+<div id="app">
+  <canvas id="gpu-canvas"></canvas>
+</div>
+<div id="fallback">
+  <div>
+    <h1>This experiment needs WebGPU.</h1>
+    <p>Your browser or device doesn't support it yet. Try the latest Chrome, Edge, or Safari Technology Preview on a desktop machine.</p>
+  </div>
+</div>
+<script>
+const app = {
+  canvas: null,
+  context: null,
+  device: null,
+  format: null,
+  width: 0,
+  height: 0,
+};
+
+function showFallback(message) {
+  const canvas = document.getElementById('gpu-canvas');
+  if (canvas) canvas.style.display = 'none';
+  const fb = document.getElementById('fallback');
+  if (message) fb.querySelector('p').textContent = message;
+  fb.classList.add('visible');
+}
+
+async function initWebGPU() {
+  if (!('gpu' in navigator)) {
+    throw new Error('navigator.gpu is not available');
+  }
+  const adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
+  if (!adapter) throw new Error('No WebGPU adapter found');
+  const device = await adapter.requestDevice();
+  const canvas = document.getElementById('gpu-canvas');
+  const context = canvas.getContext('webgpu');
+  if (!context) throw new Error('Failed to get webgpu canvas context');
+  const format = navigator.gpu.getPreferredCanvasFormat();
+
+  app.canvas = canvas;
+  app.context = context;
+  app.device = device;
+  app.format = format;
+
+  device.lost.then((info) => {
+    console.error('WebGPU device lost:', info.message);
+  });
+
+  resizeCanvas();
+  window.addEventListener('resize', resizeCanvas);
+}
+
+function resizeCanvas() {
+  if (!app.canvas || !app.device) return;
+  const dpr = Math.max(1, Math.min(window.devicePixelRatio || 1, 2));
+  const rect = app.canvas.getBoundingClientRect();
+  const width = Math.max(1, Math.floor(rect.width * dpr));
+  const height = Math.max(1, Math.floor(rect.height * dpr));
+  if (width === app.width && height === app.height) return;
+  app.width = width;
+  app.height = height;
+  app.canvas.width = width;
+  app.canvas.height = height;
+  app.context.configure({
+    device: app.device,
+    format: app.format,
+    alphaMode: 'opaque',
+  });
+}
+
+async function main() {
+  try {
+    await initWebGPU();
+  } catch (err) {
+    console.error('WebGPU init failed:', err);
+    showFallback();
+    return;
+  }
+  console.log('WebGPU ready', app.device, app.format, app.width, app.height);
+}
+
+main();
+</script>
+</body>
+</html>
