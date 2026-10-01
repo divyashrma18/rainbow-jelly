@@ -252,6 +252,8 @@ function extractRotation(F, q, out) {
   return out;
 }
 
+const STAGE_RADIUS = 3.0;
+
 class SoftBody {
   constructor(meshData, opts = {}) {
     const n = meshData.particleCount;
@@ -378,7 +380,9 @@ class SoftBody {
     }
 
     this._solveTetConstraints(dt, firmness);
+    this._solveGrabs(dt);
     this._solveFloorContact(floorY);
+    this._solveStageBounds(STAGE_RADIUS);
 
     for (let i = 0; i < n; i++) {
       if (this.invMass[i] === 0) continue;
@@ -400,14 +404,16 @@ class SoftBody {
 
   _solveTetConstraints(dt, firmness) {
     const t = this.tetCount;
-    const alphaElastic = SoftBody._complianceFromFirmness(firmness, 2e-3, 1e-7);
-    const alphaVolume = SoftBody._complianceFromFirmness(firmness, 2e-5, 1e-9);
+    // Elastic compliance is 1/modulus, divided per tet by rest volume (and layer stiffness) below, so
+    // stiffness doesn't depend on mesh resolution. Volume stays near-incompressible at every firmness.
+    const alphaElastic = SoftBody._complianceFromFirmness(firmness, 1 / 1.5e3, 1 / 1.5e6);
+    const alphaVolume = SoftBody._complianceFromFirmness(firmness, 1e-9, 1e-11);
     const dtSq = dt * dt;
     const complianceElasticBase = alphaElastic / dtSq;
     const complianceVolumeBase = alphaVolume / dtSq;
 
     const F = this._F, R = this._R, q4 = this._q;
-    const positions = this.positions, restPositions = this.restPositions;
+    const positions = this.positions;
     const invMass = this.invMass, tets = this.tets;
     const tetRestInvMatrices = this.tetRestInvMatrices, tetRestVolumes = this.tetRestVolumes;
     const tetStiffness = this.tetStiffness, tetQuat = this.tetQuat;
@@ -425,7 +431,6 @@ class SoftBody {
       const e2x = positions[c*3]-ax, e2y = positions[c*3+1]-ay, e2z = positions[c*3+2]-az;
       const e3x = positions[d*3]-ax, e3y = positions[d*3+1]-ay, e3z = positions[d*3+2]-az;
       // D column-major: columns = current edges (matches tetRestInvMatrices' column-major rest edges)
-      F[0]=0; // F = D * Rest^-1, computed via mat3Multiply below using a local D array
       const D0=e1x,D1=e1y,D2=e1z, D3=e2x,D4=e2y,D5=e2z, D6=e3x,D7=e3y,D8=e3z;
       const ir0=tetRestInvMatrices[i*9],ir1=tetRestInvMatrices[i*9+1],ir2=tetRestInvMatrices[i*9+2];
       const ir3=tetRestInvMatrices[i*9+3],ir4=tetRestInvMatrices[i*9+4],ir5=tetRestInvMatrices[i*9+5];
@@ -439,59 +444,33 @@ class SoftBody {
       extractRotation(F, q4, R);
       tetQuat[i*4]=q4[0]; tetQuat[i*4+1]=q4[1]; tetQuat[i*4+2]=q4[2]; tetQuat[i*4+3]=q4[3];
 
-      const compliance = complianceElasticBase / stiffness;
       const vol = tetRestVolumes[i];
 
-      // Rest edges rotated by R give the elastically-targeted current edges.
-      const rex1=restPositions[b*3]-restPositions[a*3], rey1=restPositions[b*3+1]-restPositions[a*3+1], rez1=restPositions[b*3+2]-restPositions[a*3+2];
-      const rex2=restPositions[c*3]-restPositions[a*3], rey2=restPositions[c*3+1]-restPositions[a*3+1], rez2=restPositions[c*3+2]-restPositions[a*3+2];
-      const rex3=restPositions[d*3]-restPositions[a*3], rey3=restPositions[d*3+1]-restPositions[a*3+1], rez3=restPositions[d*3+2]-restPositions[a*3+2];
-      const tx1 = R[0]*rex1+R[3]*rey1+R[6]*rez1, ty1 = R[1]*rex1+R[4]*rey1+R[7]*rez1, tz1 = R[2]*rex1+R[5]*rey1+R[8]*rez1;
-      const tx2 = R[0]*rex2+R[3]*rey2+R[6]*rez2, ty2 = R[1]*rex2+R[4]*rey2+R[7]*rez2, tz2 = R[2]*rex2+R[5]*rey2+R[8]*rez2;
-      const tx3 = R[0]*rex3+R[3]*rey3+R[6]*rez3, ty3 = R[1]*rex3+R[4]*rey3+R[7]*rez3, tz3 = R[2]*rex3+R[5]*rey3+R[8]*rez3;
-
-      // Per-vertex deviation of each vertex from its rotated-rest target relative to centroid —
-      // corrections are centroid-anchored (mass-weighted) so the constraint is torque-free at
-      // equilibrium, instead of always pulling toward vertex `a`.
-      const wSum = wa + wb + wc + wd;
-      // Centroid of rotated-rest shape placed at the mass-weighted centroid of current positions.
-      const cxCur = (wa*ax + wb*(ax+e1x) + wc*(ax+e2x) + wd*(ax+e3x)) / wSum;
-      const cyCur = (wa*ay + wb*(ay+e1y) + wc*(ay+e2y) + wd*(ay+e3y)) / wSum;
-      const czCur = (wa*az + wb*(az+e1z) + wc*(az+e2z) + wd*(az+e3z)) / wSum;
-      // Rotated-rest positions relative to vertex a: a=0, b=t1, c=t2, d=t3. Their mass-weighted centroid:
-      const tcx = (wb*tx1 + wc*tx2 + wd*tx3) / wSum;
-      const tcy = (wb*ty1 + wc*ty2 + wd*ty3) / wSum;
-      const tcz = (wb*tz1 + wc*tz2 + wd*tz3) / wSum;
-      // Target absolute positions: place rotated-rest centroid at current centroid.
-      const targetAx = cxCur - tcx, targetAy = cyCur - tcy, targetAz = czCur - tcz;
-
-      // Shape-matching correction (Müller et al. "Meshless Deformations"): every vertex moves the
-      // SAME fraction `kStiff` of its own deviation from the rotated-rest goal. Momentum conservation
-      // follows because the goal positions are centered on the mass-weighted centroid of the current
-      // configuration: Σ m_i (goal_i - x_i) = M·x_cm − M·x_cm = 0, so a uniform scalar times a
-      // zero-sum vector stays zero-sum — NOT from additionally weighting the per-vertex step by mass
-      // (that double-counts the mass weighting already baked into the centroid and is what broke
-      // momentum conservation in an earlier version of this constraint).
-      const kStiff = 1 / (1 + compliance);
-      if (wa > 0) {
-        positions[a*3]   -= (ax - targetAx) * kStiff;
-        positions[a*3+1] -= (ay - targetAy) * kStiff;
-        positions[a*3+2] -= (az - targetAz) * kStiff;
-      }
-      if (wb > 0) {
-        positions[b*3]   -= (ax+e1x - (targetAx+tx1)) * kStiff;
-        positions[b*3+1] -= (ay+e1y - (targetAy+ty1)) * kStiff;
-        positions[b*3+2] -= (az+e1z - (targetAz+tz1)) * kStiff;
-      }
-      if (wc > 0) {
-        positions[c*3]   -= (ax+e2x - (targetAx+tx2)) * kStiff;
-        positions[c*3+1] -= (ay+e2y - (targetAy+ty2)) * kStiff;
-        positions[c*3+2] -= (az+e2z - (targetAz+tz2)) * kStiff;
-      }
-      if (wd > 0) {
-        positions[d*3]   -= (ax+e3x - (targetAx+tx3)) * kStiff;
-        positions[d*3+1] -= (ay+e3y - (targetAy+ty3)) * kStiff;
-        positions[d*3+2] -= (az+e3z - (targetAz+tz3)) * kStiff;
+      // Co-rotational XPBD constraint C = ||F - R||_F (zero for any rigid motion, so it never fights
+      // rotation; R is a proper rotation, so inverted tets are driven back to positive orientation).
+      // dC/dF = (F - R)/C (exact by the envelope theorem, since R minimises ||F - R||), and
+      // dC/dx_j = (dC/dF) · Dm^-T column j for j = b,c,d with dC/dx_a = -(sum). The gradients sum to
+      // zero and C is rotation-invariant, so the update conserves linear and angular momentum.
+      let g0 = F[0]-R[0], g1 = F[1]-R[1], g2 = F[2]-R[2];
+      let g3 = F[3]-R[3], g4 = F[4]-R[4], g5 = F[5]-R[5];
+      let g6 = F[6]-R[6], g7 = F[7]-R[7], g8 = F[8]-R[8];
+      const Cel = Math.sqrt(g0*g0+g1*g1+g2*g2+g3*g3+g4*g4+g5*g5+g6*g6+g7*g7+g8*g8);
+      if (Cel > 1e-9) {
+        const invC = 1 / Cel;
+        g0*=invC; g1*=invC; g2*=invC; g3*=invC; g4*=invC; g5*=invC; g6*=invC; g7*=invC; g8*=invC;
+        // G(r,k) = g[k*3+r]; Dm^-1(j,k) = ir[k*3+j]
+        const gbx = g0*ir0+g3*ir3+g6*ir6, gby = g1*ir0+g4*ir3+g7*ir6, gbz = g2*ir0+g5*ir3+g8*ir6;
+        const gcx = g0*ir1+g3*ir4+g6*ir7, gcy = g1*ir1+g4*ir4+g7*ir7, gcz = g2*ir1+g5*ir4+g8*ir7;
+        const gdx = g0*ir2+g3*ir5+g6*ir8, gdy = g1*ir2+g4*ir5+g7*ir8, gdz = g2*ir2+g5*ir5+g8*ir8;
+        const gax = -(gbx+gcx+gdx), gay = -(gby+gcy+gdy), gaz = -(gbz+gcz+gdz);
+        const wGrad = wa*(gax*gax+gay*gay+gaz*gaz) + wb*(gbx*gbx+gby*gby+gbz*gbz)
+                    + wc*(gcx*gcx+gcy*gcy+gcz*gcz) + wd*(gdx*gdx+gdy*gdy+gdz*gdz);
+        const alphaTilde = complianceElasticBase / (stiffness * Math.abs(vol));
+        const lambda = -Cel / (wGrad + alphaTilde);
+        positions[a*3] += wa*lambda*gax; positions[a*3+1] += wa*lambda*gay; positions[a*3+2] += wa*lambda*gaz;
+        positions[b*3] += wb*lambda*gbx; positions[b*3+1] += wb*lambda*gby; positions[b*3+2] += wb*lambda*gbz;
+        positions[c*3] += wc*lambda*gcx; positions[c*3+1] += wc*lambda*gcy; positions[c*3+2] += wc*lambda*gcz;
+        positions[d*3] += wd*lambda*gdx; positions[d*3+1] += wd*lambda*gdy; positions[d*3+2] += wd*lambda*gdz;
       }
 
       // Volume constraint (recompute edges after elastic correction).
@@ -524,6 +503,50 @@ class SoftBody {
         positions[d*3+1] += wd * gradDy * lambda;
         positions[d*3+2] += wd * gradDz * lambda;
       }
+    }
+  }
+
+  // Each grab pulls its patch toward `target + Rot(axis, twist) · offset_i` as a soft single-
+  // particle XPBD constraint, scaled per particle by a smooth radial falloff weight.
+  _solveGrabs(dt) {
+    if (this.grabs.length === 0) return;
+    const p = this.positions, invMass = this.invMass;
+    const dtSq = dt * dt;
+    for (const g of this.grabs) {
+      const alphaTilde = g.compliance / dtSq;
+      const [ux, uy, uz] = g.axis;
+      const c = Math.cos(g.twist), s = Math.sin(g.twist), k = 1 - c;
+      const r00 = c + ux*ux*k,    r01 = ux*uy*k - uz*s, r02 = ux*uz*k + uy*s;
+      const r10 = uy*ux*k + uz*s, r11 = c + uy*uy*k,    r12 = uy*uz*k - ux*s;
+      const r20 = uz*ux*k - uy*s, r21 = uz*uy*k + ux*s, r22 = c + uz*uz*k;
+      const [tx, ty, tz] = g.target;
+      for (let j = 0; j < g.indices.length; j++) {
+        const idx = g.indices[j];
+        const w = invMass[idx];
+        if (w === 0) continue;
+        const ox = g.offsets[j*3], oy = g.offsets[j*3+1], oz = g.offsets[j*3+2];
+        const gx = tx + r00*ox + r01*oy + r02*oz;
+        const gy = ty + r10*ox + r11*oy + r12*oz;
+        const gz = tz + r20*ox + r21*oy + r22*oz;
+        const f = (w / (w + alphaTilde)) * g.weights[j];
+        let cx = (gx - p[idx*3]) * f, cy = (gy - p[idx*3+1]) * f, cz = (gz - p[idx*3+2]) * f;
+        // Cap the pull speed so a pointer flick (or a target jump) can't yank particles at hundreds
+        // of units/s and fling the whole body; the spring stays soft regardless of pointer speed.
+        const len = Math.hypot(cx, cy, cz), maxStep = HAND_MAX_PULL_SPEED * dt;
+        if (len > maxStep) { const s = maxStep / len; cx *= s; cy *= s; cz *= s; }
+        p[idx*3] += cx; p[idx*3+1] += cy; p[idx*3+2] += cz;
+      }
+    }
+  }
+
+  // Invisible walls at the stage edge: there is no camera control, so a thrown piece must not be
+  // able to leave the view for good.
+  _solveStageBounds(radius) {
+    const p = this.positions, r2 = radius * radius;
+    for (let i = 0; i < this.particleCount; i++) {
+      if (this.invMass[i] === 0) continue;
+      const x = p[i*3], z = p[i*3+2], d2 = x*x + z*z;
+      if (d2 > r2) { const s = radius / Math.sqrt(d2); p[i*3] = x * s; p[i*3+2] = z * s; }
     }
   }
 
@@ -684,7 +707,7 @@ const mat4 = {
 };
 
 const camera = {
-  eye: [3.5, 2.5, 4.5],
+  eye: [4.4, 3.1, 5.6],
   target: [0, 0, 0],
   up: [0, 1, 0],
   fovY: Math.PI / 4,
@@ -759,6 +782,176 @@ function pickBody(body, ray) {
     best = { t: tHit, point: [ox+dx*tHit, oy+dy*tHit, oz+dz*tHit], tri: i, u, v };
   }
   return best;
+}
+
+const HAND_MAX_REACH = 2.5;
+const HAND_MAX_PULL_SPEED = 8; // world units per second
+const HAND_GRAB_RADIUS = 0.4;
+const HAND_COMPLIANCE = 2e-4;
+const HAND_PICK_TOLERANCE = 0.02; // ray-to-vertex distance per unit of ray length
+
+// Fallback for clicks that land on (or a hair outside) a silhouette tip or corner, where the exact
+// triangle test misses: take the closest surface vertex to the ray within a small cone.
+function pickBodyNearVertex(body, ray) {
+  const p = body.positions, tris = body.surfaceTris;
+  const [ox, oy, oz] = ray.origin, [dx, dy, dz] = ray.dir;
+  let best = null, bestScore = Infinity;
+  for (let i = 0; i < tris.length; i++) {
+    const v = tris[i];
+    const rx = p[v*3]-ox, ry = p[v*3+1]-oy, rz = p[v*3+2]-oz;
+    const t = rx*dx + ry*dy + rz*dz;
+    if (t <= 0) continue;
+    const px = rx - dx*t, py = ry - dy*t, pz = rz - dz*t;
+    const perp = Math.hypot(px, py, pz);
+    if (perp > HAND_PICK_TOLERANCE * t) continue;
+    const score = perp / t + t * 1e-3;
+    if (score < bestScore) { bestScore = score; best = { t, point: [p[v*3], p[v*3+1], p[v*3+2]], tri: Math.floor(i / 3) }; }
+  }
+  return best;
+}
+
+function createGrab(body, hitPoint, hitTri, viewAxis) {
+  const p = body.positions;
+  const r2 = HAND_GRAB_RADIUS * HAND_GRAB_RADIUS;
+  const indices = [], weights = [];
+  for (let i = 0; i < body.particleCount; i++) {
+    if (body.invMass[i] === 0) continue;
+    const dx = p[i*3]-hitPoint[0], dy = p[i*3+1]-hitPoint[1], dz = p[i*3+2]-hitPoint[2];
+    const d2 = dx*dx + dy*dy + dz*dz;
+    if (d2 > r2) continue;
+    const falloff = 1 - d2 / r2;
+    indices.push(i);
+    weights.push(falloff * falloff);
+  }
+  if (indices.length === 0) {
+    // Thin tips/corners can leave no particle inside the radius; fall back to the hit triangle's
+    // nearest vertex so a grab never silently does nothing.
+    let nearest = -1, nearestD2 = Infinity;
+    for (let k = 0; k < 3; k++) {
+      const v = body.surfaceTris[hitTri*3+k];
+      const dx = p[v*3]-hitPoint[0], dy = p[v*3+1]-hitPoint[1], dz = p[v*3+2]-hitPoint[2];
+      const d2 = dx*dx + dy*dy + dz*dz;
+      if (d2 < nearestD2) { nearestD2 = d2; nearest = v; }
+    }
+    indices.push(nearest);
+    weights.push(1);
+  }
+  const offsets = new Float32Array(indices.length * 3);
+  for (let j = 0; j < indices.length; j++) {
+    const i = indices[j];
+    offsets[j*3]   = p[i*3]   - hitPoint[0];
+    offsets[j*3+1] = p[i*3+1] - hitPoint[1];
+    offsets[j*3+2] = p[i*3+2] - hitPoint[2];
+  }
+  return {
+    body,
+    indices: new Uint32Array(indices),
+    weights: new Float32Array(weights),
+    offsets,
+    start: hitPoint.slice(),
+    target: hitPoint.slice(),
+    twist: 0,
+    axis: viewAxis,
+    compliance: HAND_COMPLIANCE,
+  };
+}
+
+function createHandTool({ canvas, getBodies, getInvViewProj, getEye, floorY, isActive }) {
+  const pointers = new Map(); // pointerId -> { grab } | { twistOf: pointerId, lastAngle }
+
+  function eventRay(e) {
+    return screenToRay(e.clientX, e.clientY, getInvViewProj(), canvas.getBoundingClientRect());
+  }
+
+  function updateCursor() {
+    if (!isActive()) return;
+    let grabbing = false;
+    for (const entry of pointers.values()) if (entry.grab) grabbing = true;
+    canvas.style.cursor = grabbing ? 'grabbing' : 'grab';
+  }
+
+  function releaseGrab(id) {
+    const entry = pointers.get(id);
+    if (!entry) return;
+    if (entry.grab) {
+      const list = entry.grab.body.grabs;
+      const at = list.indexOf(entry.grab);
+      if (at >= 0) list.splice(at, 1);
+      for (const [otherId, other] of pointers) if (other.twistOf === id) pointers.delete(otherId);
+    }
+    pointers.delete(id);
+    updateCursor();
+  }
+
+  function onDown(e) {
+    if (!isActive()) return;
+    if (pointers.has(e.pointerId)) releaseGrab(e.pointerId);
+    const ray = eventRay(e);
+    let best = null, bestBody = null;
+    for (const body of getBodies()) {
+      const hit = pickBody(body, ray);
+      if (hit && (!best || hit.t < best.t)) { best = hit; bestBody = body; }
+    }
+    if (!best) {
+      for (const body of getBodies()) {
+        const hit = pickBodyNearVertex(body, ray);
+        if (hit && (!best || hit.t < best.t)) { best = hit; bestBody = body; }
+      }
+    }
+    if (best) {
+      const eye = getEye();
+      const ax = best.point[0]-eye[0], ay = best.point[1]-eye[1], az = best.point[2]-eye[2];
+      const len = Math.hypot(ax, ay, az) || 1;
+      const grab = createGrab(bestBody, best.point, best.tri, [ax/len, ay/len, az/len]);
+      bestBody.grabs.push(grab);
+      pointers.set(e.pointerId, { grab, x: e.clientX, y: e.clientY, type: e.pointerType });
+      canvas.setPointerCapture(e.pointerId);
+      e.preventDefault();
+      updateCursor();
+      return;
+    }
+    onDownMiss(e);
+  }
+
+  // Filled in by the twist task; a miss is a no-op until then.
+  function onDownMiss(e) {}
+
+  function onMove(e) {
+    const entry = pointers.get(e.pointerId);
+    if (!entry) return;
+    entry.x = e.clientX; entry.y = e.clientY;
+    if (!entry.grab) return;
+    const g = entry.grab;
+    const ray = eventRay(e);
+    const [nx, ny, nz] = g.axis;
+    const denom = ray.dir[0]*nx + ray.dir[1]*ny + ray.dir[2]*nz;
+    if (Math.abs(denom) < 1e-6) return;
+    const tPlane = ((g.start[0]-ray.origin[0])*nx + (g.start[1]-ray.origin[1])*ny + (g.start[2]-ray.origin[2])*nz) / denom;
+    if (tPlane <= 0) return;
+    let dx = ray.origin[0] + ray.dir[0]*tPlane - g.start[0];
+    let dy = ray.origin[1] + ray.dir[1]*tPlane - g.start[1];
+    let dz = ray.origin[2] + ray.dir[2]*tPlane - g.start[2];
+    const dist = Math.hypot(dx, dy, dz);
+    if (dist > HAND_MAX_REACH) { const s = HAND_MAX_REACH / dist; dx *= s; dy *= s; dz *= s; }
+    g.target[0] = g.start[0] + dx;
+    g.target[1] = Math.max(floorY + 0.05, g.start[1] + dy);
+    g.target[2] = g.start[2] + dz;
+  }
+
+  function onUp(e) { releaseGrab(e.pointerId); }
+
+  canvas.addEventListener('pointerdown', onDown);
+  canvas.addEventListener('pointermove', onMove);
+  canvas.addEventListener('pointerup', onUp);
+  canvas.addEventListener('pointercancel', onUp);
+  // A missed pointerup (capture stolen, window blurred mid-drag) would otherwise pin the jelly
+  // to an orphaned grab forever.
+  canvas.addEventListener('lostpointercapture', onUp);
+  const releaseAll = () => { for (const id of [...pointers.keys()]) releaseGrab(id); };
+  window.addEventListener('blur', releaseAll);
+  updateCursor();
+
+  return { pointers, releaseAll };
 }
 
 function createFloorRenderer(device, format, floorY) {
@@ -928,7 +1121,18 @@ async function main() {
 
   // Debug handle for manual slider-extreme checks (console-driven, until the Phase 5 UI sliders
   // exist) — the plan's own Task 1.4 verification step needs this to reach physicsParams.
-  window.__jelly = { body, physicsParams, clock };
+  const bodies = [body];
+  let invViewProj = mat4.invert(getViewProjMatrix(camera, app.width / app.height));
+  const hand = createHandTool({
+    canvas: app.canvas,
+    getBodies: () => bodies,
+    getInvViewProj: () => invViewProj,
+    getEye: () => camera.eye,
+    floorY,
+    isActive: () => true,
+  });
+
+  window.__jelly = { body, bodies, physicsParams, clock, hand };
 
   function physicsStep(dt) {
     const subDt = dt / physicsParams.substeps;
@@ -943,6 +1147,7 @@ async function main() {
 
     const aspect = app.width / app.height;
     const viewProj = getViewProjMatrix(camera, aspect);
+    invViewProj = mat4.invert(viewProj) || invViewProj;
     const depthTex = getDepthTexture(app.device, app.width, app.height);
 
     const encoder = app.device.createCommandEncoder();
