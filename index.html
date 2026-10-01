@@ -325,6 +325,32 @@ class SoftBody {
     for (const [lo, hi] of edgeSet.values()) { this.edges[ei++] = lo; this.edges[ei++] = hi; }
     this.edgeCount = edgeSet.size;
 
+    // Boundary surface: tet faces that belong to exactly one tet, wound so normals point away
+    // from the tet's fourth (opposite) vertex, i.e. outward from the body.
+    const faceMap = new Map();
+    const faceOpp = [[1,2,3,0],[0,2,3,1],[0,1,3,2],[0,1,2,3]];
+    const rp = this.restPositions;
+    for (let i = 0; i < t; i++) {
+      for (const [p, q, r, o] of faceOpp) {
+        const v0 = this.tets[i*4+p], v1 = this.tets[i*4+q], v2 = this.tets[i*4+r], vo = this.tets[i*4+o];
+        const lo = Math.min(v0, v1, v2), hi = Math.max(v0, v1, v2), mid = v0 + v1 + v2 - lo - hi;
+        const key = (lo * n + mid) * n + hi;
+        const existing = faceMap.get(key);
+        if (existing) { existing.count++; continue; }
+        const ux = rp[v1*3]-rp[v0*3], uy = rp[v1*3+1]-rp[v0*3+1], uz = rp[v1*3+2]-rp[v0*3+2];
+        const wx = rp[v2*3]-rp[v0*3], wy = rp[v2*3+1]-rp[v0*3+1], wz = rp[v2*3+2]-rp[v0*3+2];
+        const nx = uy*wz-uz*wy, ny = uz*wx-ux*wz, nz = ux*wy-uy*wx;
+        const toOpp = nx*(rp[vo*3]-rp[v0*3]) + ny*(rp[vo*3+1]-rp[v0*3+1]) + nz*(rp[vo*3+2]-rp[v0*3+2]);
+        faceMap.set(key, { count: 1, tri: toOpp > 0 ? [v0, v2, v1] : [v0, v1, v2] });
+      }
+    }
+    const surface = [];
+    for (const f of faceMap.values()) if (f.count === 1) surface.push(f.tri[0], f.tri[1], f.tri[2]);
+    this.surfaceTris = new Uint32Array(surface);
+    this.surfaceTriCount = surface.length / 3;
+
+    this.grabs = [];
+
     // Reusable scratch to avoid per-substep, per-tet allocation in the hot loop.
     this._F = new Float32Array(9);
     this._R = new Float32Array(9);
@@ -670,6 +696,69 @@ function getViewProjMatrix(cam, aspect) {
   const view = mat4.lookAt(cam.eye, cam.target, cam.up);
   const proj = mat4.perspective(cam.fovY, aspect, cam.near, cam.far);
   return mat4.multiply(proj, view);
+}
+
+// Column-major 4x4 inverse (cofactor expansion). Returns null for a singular matrix.
+mat4.invert = function (m) {
+  const a00=m[0],a01=m[1],a02=m[2],a03=m[3],a10=m[4],a11=m[5],a12=m[6],a13=m[7];
+  const a20=m[8],a21=m[9],a22=m[10],a23=m[11],a30=m[12],a31=m[13],a32=m[14],a33=m[15];
+  const b00=a00*a11-a01*a10, b01=a00*a12-a02*a10, b02=a00*a13-a03*a10, b03=a01*a12-a02*a11;
+  const b04=a01*a13-a03*a11, b05=a02*a13-a03*a12, b06=a20*a31-a21*a30, b07=a20*a32-a22*a30;
+  const b08=a20*a33-a23*a30, b09=a21*a32-a22*a31, b10=a21*a33-a23*a31, b11=a22*a33-a23*a32;
+  let det = b00*b11-b01*b10+b02*b09+b03*b08-b04*b07+b05*b06;
+  if (Math.abs(det) < 1e-20) return null;
+  det = 1 / det;
+  return new Float32Array([
+    (a11*b11-a12*b10+a13*b09)*det, (a02*b10-a01*b11-a03*b09)*det, (a31*b05-a32*b04+a33*b03)*det, (a22*b04-a21*b05-a23*b03)*det,
+    (a12*b08-a10*b11-a13*b07)*det, (a00*b11-a02*b08+a03*b07)*det, (a32*b02-a30*b05-a33*b01)*det, (a20*b05-a22*b02+a23*b01)*det,
+    (a10*b10-a11*b08+a13*b06)*det, (a01*b08-a00*b10-a03*b06)*det, (a30*b04-a31*b02+a33*b00)*det, (a21*b02-a20*b04-a23*b00)*det,
+    (a11*b07-a10*b09-a12*b06)*det, (a00*b09-a01*b07+a02*b06)*det, (a31*b01-a30*b03-a32*b00)*det, (a20*b03-a21*b01+a22*b00)*det,
+  ]);
+};
+
+function transformPoint(m, x, y, z) {
+  const w = m[3]*x + m[7]*y + m[11]*z + m[15];
+  return [
+    (m[0]*x + m[4]*y + m[8]*z + m[12]) / w,
+    (m[1]*x + m[5]*y + m[9]*z + m[13]) / w,
+    (m[2]*x + m[6]*y + m[10]*z + m[14]) / w,
+  ];
+}
+
+function screenToRay(clientX, clientY, invViewProj, rect) {
+  const nx = ((clientX - rect.left) / rect.width) * 2 - 1;
+  const ny = 1 - ((clientY - rect.top) / rect.height) * 2;
+  const near = transformPoint(invViewProj, nx, ny, -1);
+  const far = transformPoint(invViewProj, nx, ny, 1);
+  const dx = far[0]-near[0], dy = far[1]-near[1], dz = far[2]-near[2];
+  const len = Math.hypot(dx, dy, dz) || 1;
+  return { origin: near, dir: [dx/len, dy/len, dz/len] };
+}
+
+// Möller–Trumbore against the body's outward surface triangles; nearest front-facing hit wins.
+function pickBody(body, ray) {
+  const p = body.positions, tris = body.surfaceTris;
+  const [ox, oy, oz] = ray.origin, [dx, dy, dz] = ray.dir;
+  let best = null;
+  for (let i = 0; i < body.surfaceTriCount; i++) {
+    const i0 = tris[i*3], i1 = tris[i*3+1], i2 = tris[i*3+2];
+    const e1x = p[i1*3]-p[i0*3], e1y = p[i1*3+1]-p[i0*3+1], e1z = p[i1*3+2]-p[i0*3+2];
+    const e2x = p[i2*3]-p[i0*3], e2y = p[i2*3+1]-p[i0*3+1], e2z = p[i2*3+2]-p[i0*3+2];
+    const hx = dy*e2z-dz*e2y, hy = dz*e2x-dx*e2z, hz = dx*e2y-dy*e2x;
+    const det = e1x*hx + e1y*hy + e1z*hz;
+    if (Math.abs(det) < 1e-12) continue;
+    const inv = 1 / det;
+    const sx = ox-p[i0*3], sy = oy-p[i0*3+1], sz = oz-p[i0*3+2];
+    const u = (sx*hx + sy*hy + sz*hz) * inv;
+    if (u < 0 || u > 1) continue;
+    const qx = sy*e1z-sz*e1y, qy = sz*e1x-sx*e1z, qz = sx*e1y-sy*e1x;
+    const v = (dx*qx + dy*qy + dz*qz) * inv;
+    if (v < 0 || u + v > 1) continue;
+    const tHit = (e2x*qx + e2y*qy + e2z*qz) * inv;
+    if (tHit <= 0 || (best && tHit >= best.t)) continue;
+    best = { t: tHit, point: [ox+dx*tHit, oy+dy*tHit, oz+dz*tHit], tri: i, u, v };
+  }
+  return best;
 }
 
 function createFloorRenderer(device, format, floorY) {
