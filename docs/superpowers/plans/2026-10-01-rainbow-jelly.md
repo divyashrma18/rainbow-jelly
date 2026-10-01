@@ -1035,4 +1035,44 @@ git commit -m "feat: render loop with floor + wireframe tet mesh, physics wired 
 
 ## Phase 2 — Hand tool (mouse + touch + twist)
 
-*(Later phases to be detailed in follow-up plan revisions — see spec Process steps 2-6. Phase 1 is the independently testable, committable slice this plan currently covers in full code detail.)*
+Written after Phase 1 shipped, against the real code. Spec: "grab any point (tip, corner, any layer) — ray-pick the surface, attach a soft spring to the patch of nearby particles, bounded reach. Drag to pull. Scroll wheel or a second finger while holding twists it. Full multi-touch support."
+
+Verification follows Phase 1's method: temporary in-page assertion blocks run via Playwright (RED before code, GREEN after, then removed), plus Playwright-driven pointer/wheel input and screenshots.
+
+### Task 2.1: Boundary surface + ray picking
+
+**Interfaces:**
+- Produces: `SoftBody.surfaceTris` (Uint32Array, outward-wound boundary triangles, 3 indices each) and `surfaceTriCount`. Phase 3 will reuse these as the base skin mesh.
+- Produces: `mat4.invert(m) -> Float32Array|null`; `screenToRay(clientX, clientY, invViewProj) -> {origin:[3], dir:[3]}` (dir normalized).
+- Produces: `pickBody(body, ray) -> {t, point:[3], tri} | null`, using Möller–Trumbore against `surfaceTris`, returning the nearest hit.
+
+**Tests (temporary assertion block):**
+- Every edge of `surfaceTris` is shared by exactly 2 surface triangles (closed manifold).
+- The divergence-theorem volume of the surface (Σ dot(v0, cross(v1, v2)) / 6) is > 0 and within 1% of Σ|tetRestVolumes| (all triangles wound outward).
+- A ray from the camera eye toward the body centroid hits, with hit.point on the camera-facing side.
+- A ray pointing away from the body returns null.
+
+### Task 2.2: Grab spring + pointer drag (mouse + multi-touch)
+
+**Interfaces:**
+- Consumes: `pickBody`, `screenToRay`, `camera`, `getViewProjMatrix`.
+- Produces: `SoftBody.grabs` (array) and `SoftBody._solveGrabs(dt)`, called in `step()` after the tet constraints and before floor contact. Each grab is `{ indices: Uint32Array, offsets: Float32Array (rest-of-patch offsets from the anchor, in world space at grab time), weights: Float32Array (smooth falloff 1→0 over the radius), target: [3], twist: number, axis: [3], compliance: number }`. Each particle i in the patch is pulled toward `target + Rot(axis, twist) · offset_i` as a single-particle XPBD constraint scaled by weight_i.
+- Produces: `createHandTool({ canvas, getBodies, getInvViewProj, floorY })` that installs pointer listeners on the canvas. Each pointer that hits jelly gets its own grab, so several fingers pull independently. The drag target moves on a camera-facing plane through the hit point, is clamped to `MAX_REACH = 2.5` from the grab start (bounded reach), and is kept at least 0.05 above the floor. Pointer up or cancel removes that pointer's grab. Uses `setPointerCapture`.
+- Patch: particles within `GRAB_RADIUS = 0.35` of the hit point, at least 1 (the nearest vertex of the hit triangle as a fallback — Review Focus: a tip or corner grab must never silently no-op).
+- Cursor: `grab` while idle, `grabbing` while any grab is active.
+
+**Tests:**
+- A Playwright mouse drag from the bar's top surface upward raises the grabbed region's centroid by more than 0.5, with no NaN.
+- After release, `body.grabs.length === 0` and the body settles back (volume ratio within [0.9, 1.1]).
+- A grab at the extreme corner (tip) attaches at least 1 particle.
+- Dragging the pointer far off-screen keeps the target within MAX_REACH of the grab start.
+
+### Task 2.3: Twist (wheel + second finger)
+
+**Interfaces:**
+- Wheel while a mouse grab is active adds `-deltaY * 0.004` rad to that grab's `twist` and calls `preventDefault`. The axis is the view direction (camera eye → grab anchor).
+- Touch: a pointer that goes down on empty space while another touch grab is active becomes that grab's twist finger. Twist is driven by the change in the angle of the vector from the grab pointer to the twist pointer. Lifting the twist finger leaves the twist where it is.
+
+**Tests:**
+- With a grab held, wheel scrolling (5 × deltaY = -100) rotates the patch: the angle between a patch particle's offset before and after, about the view axis, is > 0.3 rad.
+- A synthetic second touch pointer rotated 90° around the first changes `grab.twist` by about π/2 (±0.2).
