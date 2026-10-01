@@ -88,6 +88,93 @@ function resizeCanvas() {
   });
 }
 
+function roundedRectSDF(x, y, hw, hh, r) {
+  const qx = Math.abs(x) - (hw - r);
+  const qy = Math.abs(y) - (hh - r);
+  const ax = Math.max(qx, 0), ay = Math.max(qy, 0);
+  return Math.sqrt(ax * ax + ay * ay) + Math.min(Math.max(qx, qy), 0) - r;
+}
+
+function buildJellyMesh(opts = {}) {
+  const width = opts.width ?? 4;
+  const height = opts.height ?? 1.4;
+  const depth = opts.depth ?? 1.6;
+  const cornerRadius = opts.cornerRadius ?? 0.15;
+  const targetParticles = opts.targetParticles ?? 600;
+
+  const hw = width / 2;
+  const hh = height / 2;
+  const hd = depth / 2;
+
+  const aspectXY = width / height;
+  const fillRatio = 0.88;
+  const depthRatio = depth / height;
+  const ny = Math.max(3, Math.round(Math.cbrt(targetParticles / (fillRatio * aspectXY * depthRatio))));
+  const nx = Math.max(3, Math.round(ny * aspectXY));
+  const nz = Math.max(2, Math.round(ny * depthRatio));
+
+  const positions = [];
+  const grid = new Array(nx * ny * nz).fill(-1);
+
+  const idx3 = (ix, iy, iz) => ix + nx * (iy + ny * iz);
+
+  for (let iz = 0; iz < nz; iz++) {
+    const z = -hd + (depth * iz) / (nz - 1);
+    for (let iy = 0; iy < ny; iy++) {
+      const y = -hh + (height * iy) / (ny - 1);
+      for (let ix = 0; ix < nx; ix++) {
+        const x = -hw + (width * ix) / (nx - 1);
+        const d = roundedRectSDF(x, y, hw, hh, cornerRadius);
+        if (d <= 1e-6) {
+          grid[idx3(ix, iy, iz)] = positions.length / 3;
+          positions.push(x, y, z);
+        }
+      }
+    }
+  }
+
+  const tets = [];
+  const cubeTets = [
+    [0, 1, 3, 7], [0, 1, 7, 5], [0, 5, 7, 4],
+    [0, 3, 2, 7], [0, 2, 6, 7], [0, 6, 4, 7],
+  ];
+
+  for (let iz = 0; iz < nz - 1; iz++) {
+    for (let iy = 0; iy < ny - 1; iy++) {
+      for (let ix = 0; ix < nx - 1; ix++) {
+        const c = [
+          grid[idx3(ix, iy, iz)],       grid[idx3(ix + 1, iy, iz)],
+          grid[idx3(ix, iy + 1, iz)],   grid[idx3(ix + 1, iy + 1, iz)],
+          grid[idx3(ix, iy, iz + 1)],   grid[idx3(ix + 1, iy, iz + 1)],
+          grid[idx3(ix, iy + 1, iz + 1)], grid[idx3(ix + 1, iy + 1, iz + 1)],
+        ];
+        if (c.some((v) => v < 0)) continue;
+        for (const [a, b, cc, d] of cubeTets) {
+          tets.push(c[a], c[b], c[cc], c[d]);
+        }
+      }
+    }
+  }
+
+  const positionsArr = new Float32Array(positions);
+  const tetsArr = new Uint32Array(tets);
+
+  let minY = Infinity, maxY = -Infinity;
+  for (let i = 1; i < positionsArr.length; i += 3) {
+    if (positionsArr[i] < minY) minY = positionsArr[i];
+    if (positionsArr[i] > maxY) maxY = positionsArr[i];
+  }
+
+  return {
+    positions: positionsArr,
+    tets: tetsArr,
+    particleCount: positionsArr.length / 3,
+    tetCount: tetsArr.length / 4,
+    layerHeightMin: minY,
+    layerHeightMax: maxY,
+  };
+}
+
 async function main() {
   try {
     await initWebGPU();
