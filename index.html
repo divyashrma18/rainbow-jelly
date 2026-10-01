@@ -786,8 +786,9 @@ function pickBody(body, ray) {
 
 const HAND_MAX_REACH = 2.5;
 const HAND_MAX_PULL_SPEED = 8; // world units per second
+const HAND_WHEEL_TWIST = 0.004; // radians per wheel pixel
 const HAND_GRAB_RADIUS = 0.4;
-const HAND_COMPLIANCE = 2e-4;
+const HAND_COMPLIANCE = 5e-5;
 const HAND_PICK_TOLERANCE = 0.02; // ray-to-vertex distance per unit of ray length
 
 // Fallback for clicks that land on (or a hair outside) a silhouette tip or corner, where the exact
@@ -819,9 +820,10 @@ function createGrab(body, hitPoint, hitTri, viewAxis) {
     const dx = p[i*3]-hitPoint[0], dy = p[i*3+1]-hitPoint[1], dz = p[i*3+2]-hitPoint[2];
     const d2 = dx*dx + dy*dy + dz*dz;
     if (d2 > r2) continue;
-    const falloff = 1 - d2 / r2;
+    // Firm grip across the whole patch (a hand, not a pin): the rim keeps enough weight to carry
+    // twists, while the centre still holds hardest.
     indices.push(i);
-    weights.push(falloff * falloff);
+    weights.push(0.4 + 0.6 * (1 - d2 / r2));
   }
   if (indices.length === 0) {
     // Thin tips/corners can leave no particle inside the radius; fall back to the hit triangle's
@@ -873,6 +875,10 @@ function createHandTool({ canvas, getBodies, getInvViewProj, getEye, floorY, isA
   function releaseGrab(id) {
     const entry = pointers.get(id);
     if (!entry) return;
+    if (entry.twistOf !== undefined) {
+      const owner = pointers.get(entry.twistOf);
+      if (owner) owner.twistFinger = undefined;
+    }
     if (entry.grab) {
       const list = entry.grab.body.grabs;
       const at = list.indexOf(entry.grab);
@@ -913,14 +919,55 @@ function createHandTool({ canvas, getBodies, getInvViewProj, getEye, floorY, isA
     onDownMiss(e);
   }
 
-  // Filled in by the twist task; a miss is a no-op until then.
-  function onDownMiss(e) {}
+  // A touch that misses the jelly while a finger is already holding it becomes that grab's twist
+  // finger: rotating it around the holding finger twists the grabbed patch.
+  function onDownMiss(e) {
+    if (e.pointerType !== 'touch') return;
+    let ownerId = null;
+    for (const [id, entry] of pointers) {
+      if (entry.grab && entry.type === 'touch' && entry.twistFinger === undefined) ownerId = id;
+    }
+    if (ownerId === null) return;
+    const owner = pointers.get(ownerId);
+    owner.twistFinger = e.pointerId;
+    pointers.set(e.pointerId, {
+      twistOf: ownerId, x: e.clientX, y: e.clientY, type: e.pointerType,
+      lastAngle: Math.atan2(e.clientY - owner.y, e.clientX - owner.x),
+    });
+    canvas.setPointerCapture(e.pointerId);
+    e.preventDefault();
+  }
+
+  function updateTwist(ownerId) {
+    const owner = pointers.get(ownerId);
+    if (!owner || owner.twistFinger === undefined) return;
+    const finger = pointers.get(owner.twistFinger);
+    if (!finger) return;
+    const angle = Math.atan2(finger.y - owner.y, finger.x - owner.x);
+    let delta = angle - finger.lastAngle;
+    if (delta > Math.PI) delta -= 2 * Math.PI; else if (delta < -Math.PI) delta += 2 * Math.PI;
+    finger.lastAngle = angle;
+    owner.grab.twist += delta;
+  }
+
+  function onWheel(e) {
+    if (!isActive()) return;
+    let latest = null;
+    for (const entry of pointers.values()) if (entry.grab) latest = entry;
+    if (!latest) return;
+    e.preventDefault();
+    const scale = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? 400 : 1;
+    latest.grab.twist += -e.deltaY * scale * HAND_WHEEL_TWIST;
+  }
 
   function onMove(e) {
     const entry = pointers.get(e.pointerId);
     if (!entry) return;
+    if (e.pointerType === 'mouse' && e.buttons === 0) { releaseGrab(e.pointerId); return; }
     entry.x = e.clientX; entry.y = e.clientY;
+    if (entry.twistOf !== undefined) { updateTwist(entry.twistOf); return; }
     if (!entry.grab) return;
+    if (entry.twistFinger !== undefined) updateTwist(e.pointerId);
     const g = entry.grab;
     const ray = eventRay(e);
     const [nx, ny, nz] = g.axis;
@@ -947,6 +994,9 @@ function createHandTool({ canvas, getBodies, getInvViewProj, getEye, floorY, isA
   // A missed pointerup (capture stolen, window blurred mid-drag) would otherwise pin the jelly
   // to an orphaned grab forever.
   canvas.addEventListener('lostpointercapture', onUp);
+  canvas.addEventListener('wheel', onWheel, { passive: false });
+  window.addEventListener('pointerup', onUp);
+  window.addEventListener('pointermove', (e) => { if (pointers.has(e.pointerId) && e.target !== canvas) onMove(e); });
   const releaseAll = () => { for (const id of [...pointers.keys()]) releaseGrab(id); };
   window.addEventListener('blur', releaseAll);
   updateCursor();
