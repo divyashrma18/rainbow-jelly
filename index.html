@@ -175,6 +175,359 @@ function buildJellyMesh(opts = {}) {
   };
 }
 
+function mat3Multiply(a, b, out) {
+  out[0] = a[0]*b[0] + a[3]*b[1] + a[6]*b[2];
+  out[1] = a[1]*b[0] + a[4]*b[1] + a[7]*b[2];
+  out[2] = a[2]*b[0] + a[5]*b[1] + a[8]*b[2];
+  out[3] = a[0]*b[3] + a[3]*b[4] + a[6]*b[5];
+  out[4] = a[1]*b[3] + a[4]*b[4] + a[7]*b[5];
+  out[5] = a[2]*b[3] + a[5]*b[4] + a[8]*b[5];
+  out[6] = a[0]*b[6] + a[3]*b[7] + a[6]*b[8];
+  out[7] = a[1]*b[6] + a[4]*b[7] + a[7]*b[8];
+  out[8] = a[2]*b[6] + a[5]*b[7] + a[8]*b[8];
+  return out;
+}
+
+function mat3Determinant(m) {
+  return m[0]*(m[4]*m[8]-m[5]*m[7]) - m[3]*(m[1]*m[8]-m[2]*m[7]) + m[6]*(m[1]*m[5]-m[2]*m[4]);
+}
+
+function mat3Inverse(m, out) {
+  const det = mat3Determinant(m);
+  const invDet = Math.abs(det) > 1e-12 ? 1 / det : 0;
+  out[0] = (m[4]*m[8]-m[5]*m[7]) * invDet;
+  out[1] = (m[2]*m[7]-m[1]*m[8]) * invDet;
+  out[2] = (m[1]*m[5]-m[2]*m[4]) * invDet;
+  out[3] = (m[5]*m[6]-m[3]*m[8]) * invDet;
+  out[4] = (m[0]*m[8]-m[2]*m[6]) * invDet;
+  out[5] = (m[2]*m[3]-m[0]*m[5]) * invDet;
+  out[6] = (m[3]*m[7]-m[4]*m[6]) * invDet;
+  out[7] = (m[1]*m[6]-m[0]*m[7]) * invDet;
+  out[8] = (m[0]*m[4]-m[1]*m[3]) * invDet;
+  return out;
+}
+
+// Polar decomposition via Jacobi-free iterative method (Müller et al.) — extracts best-fit rotation R from F.
+function extractRotation(F, out) {
+  let q = [1, 0, 0, 0]; // identity quaternion (w,x,y,z)
+  for (let iter = 0; iter < 8; iter++) {
+    const qx = q[1], qy = q[2], qz = q[3], qw = q[0];
+    const r00 = 1-2*(qy*qy+qz*qz), r01 = 2*(qx*qy-qz*qw), r02 = 2*(qx*qz+qy*qw);
+    const r10 = 2*(qx*qy+qz*qw), r11 = 1-2*(qx*qx+qz*qz), r12 = 2*(qy*qz-qx*qw);
+    const r20 = 2*(qx*qz-qy*qw), r21 = 2*(qy*qz+qx*qw), r22 = 1-2*(qx*qx+qy*qy);
+    const cx = (r10*F[2]+r11*F[5]+r12*F[8]) - (r20*F[1]+r21*F[4]+r22*F[7]);
+    const cy = (r20*F[0]+r21*F[3]+r22*F[6]) - (r00*F[2]+r01*F[5]+r02*F[8]);
+    const cz = (r00*F[1]+r01*F[4]+r02*F[7]) - (r10*F[0]+r11*F[3]+r12*F[6]);
+    const dot = r00*F[0]+r01*F[3]+r02*F[6] + r10*F[1]+r11*F[4]+r12*F[7] + r20*F[2]+r21*F[5]+r22*F[8];
+    const omegaLen2 = cx*cx+cy*cy+cz*cz;
+    if (omegaLen2 < 1e-9) break;
+    const w = Math.abs(dot) + 1e-6;
+    const omega = [cx / w, cy / w, cz / w];
+    const angle = Math.sqrt(omega[0]*omega[0]+omega[1]*omega[1]+omega[2]*omega[2]);
+    if (angle < 1e-9) break;
+    const axis = [omega[0]/angle, omega[1]/angle, omega[2]/angle];
+    const half = angle / 2;
+    const s = Math.sin(half);
+    const dq = [Math.cos(half), axis[0]*s, axis[1]*s, axis[2]*s];
+    const nq = [
+      dq[0]*q[0] - dq[1]*q[1] - dq[2]*q[2] - dq[3]*q[3],
+      dq[0]*q[1] + dq[1]*q[0] + dq[2]*q[3] - dq[3]*q[2],
+      dq[0]*q[2] - dq[1]*q[3] + dq[2]*q[0] + dq[3]*q[1],
+      dq[0]*q[3] + dq[1]*q[2] - dq[2]*q[1] + dq[3]*q[0],
+    ];
+    const len = Math.hypot(nq[0], nq[1], nq[2], nq[3]) || 1;
+    q = [nq[0]/len, nq[1]/len, nq[2]/len, nq[3]/len];
+  }
+  const qx = q[1], qy = q[2], qz = q[3], qw = q[0];
+  out[0] = 1-2*(qy*qy+qz*qz); out[1] = 2*(qx*qy-qz*qw);   out[2] = 2*(qx*qz+qy*qw);
+  out[3] = 2*(qx*qy+qz*qw);   out[4] = 1-2*(qx*qx+qz*qz); out[5] = 2*(qy*qz-qx*qw);
+  out[6] = 2*(qx*qz-qy*qw);   out[7] = 2*(qy*qz+qx*qw);   out[8] = 1-2*(qx*qx+qy*qy);
+  return out;
+}
+
+class SoftBody {
+  constructor(meshData, opts = {}) {
+    const n = meshData.particleCount;
+    const t = meshData.tetCount;
+    this.particleCount = n;
+    this.tetCount = t;
+    this.restPositions = new Float32Array(meshData.positions);
+    this.positions = new Float32Array(meshData.positions);
+    this.prevPositions = new Float32Array(meshData.positions);
+    this.velocities = new Float32Array(n * 3);
+    this.invMass = new Float32Array(n).fill(1);
+    this.tets = new Uint32Array(meshData.tets);
+    this.tetRestVolumes = new Float32Array(t);
+    this.tetRestInvMatrices = new Float32Array(t * 9);
+    this.tetStiffness = new Float32Array(t);
+
+    const layerFn = opts.layerStiffness || (() => 1.0);
+
+    for (let i = 0; i < t; i++) {
+      const a = this.tets[i*4], b = this.tets[i*4+1], c = this.tets[i*4+2], d = this.tets[i*4+3];
+      const ax = this.restPositions[a*3], ay = this.restPositions[a*3+1], az = this.restPositions[a*3+2];
+      const e1 = [this.restPositions[b*3]-ax, this.restPositions[b*3+1]-ay, this.restPositions[b*3+2]-az];
+      const e2 = [this.restPositions[c*3]-ax, this.restPositions[c*3+1]-ay, this.restPositions[c*3+2]-az];
+      const e3 = [this.restPositions[d*3]-ax, this.restPositions[d*3+1]-ay, this.restPositions[d*3+2]-az];
+      const m = [e1[0], e2[0], e3[0], e1[1], e2[1], e3[1], e1[2], e2[2], e3[2]];
+      const vol = mat3Determinant(m) / 6;
+      this.tetRestVolumes[i] = Math.abs(vol);
+      const inv = new Array(9);
+      mat3Inverse(m, inv);
+      for (let k = 0; k < 9; k++) this.tetRestInvMatrices[i*9+k] = inv[k];
+      const centroidY = (ay + this.restPositions[b*3+1] + this.restPositions[c*3+1] + this.restPositions[d*3+1]) / 4;
+      this.tetStiffness[i] = layerFn(centroidY);
+    }
+
+    const massAccum = new Float32Array(n);
+    const density = 1.0;
+    for (let i = 0; i < t; i++) {
+      const share = (this.tetRestVolumes[i] * density) / 4;
+      for (let k = 0; k < 4; k++) massAccum[this.tets[i*4+k]] += share;
+    }
+    for (let i = 0; i < n; i++) {
+      this.invMass[i] = massAccum[i] > 1e-9 ? 1 / massAccum[i] : 0;
+    }
+    this._totalMass = 0;
+    for (let i = 0; i < n; i++) this._totalMass += massAccum[i];
+
+    this._F = new Array(9);
+    this._R = new Array(9);
+  }
+
+  step(dt, globalParams) {
+    const n = this.particleCount;
+    const g = globalParams.gravity;
+    const floorY = globalParams.floorY;
+    const firmness = globalParams.firmness;
+    const damping = globalParams.damping;
+
+    for (let i = 0; i < n; i++) {
+      if (this.invMass[i] === 0) continue;
+      this.prevPositions[i*3] = this.positions[i*3];
+      this.prevPositions[i*3+1] = this.positions[i*3+1];
+      this.prevPositions[i*3+2] = this.positions[i*3+2];
+      this.velocities[i*3]   += g[0] * dt;
+      this.velocities[i*3+1] += g[1] * dt;
+      this.velocities[i*3+2] += g[2] * dt;
+      this.positions[i*3]   += this.velocities[i*3] * dt;
+      this.positions[i*3+1] += this.velocities[i*3+1] * dt;
+      this.positions[i*3+2] += this.velocities[i*3+2] * dt;
+    }
+
+    this._solveTetConstraints(dt, firmness);
+    this._solveFloorContact(floorY);
+
+    for (let i = 0; i < n; i++) {
+      if (this.invMass[i] === 0) continue;
+      this.velocities[i*3]   = (this.positions[i*3]   - this.prevPositions[i*3])   / dt;
+      this.velocities[i*3+1] = (this.positions[i*3+1] - this.prevPositions[i*3+1]) / dt;
+      this.velocities[i*3+2] = (this.positions[i*3+2] - this.prevPositions[i*3+2]) / dt;
+    }
+
+    this._applyEdgeDamping(damping);
+  }
+
+  _solveTetConstraints(dt, firmness) {
+    const t = this.tetCount;
+    const complianceScale = Math.max(1e-4, 1 - firmness);
+    const alphaElastic = 0.0001 * complianceScale;
+    const alphaVolume = 0.00002 * complianceScale;
+    const dtSq = dt * dt;
+
+    for (let i = 0; i < t; i++) {
+      const a = this.tets[i*4], b = this.tets[i*4+1], c = this.tets[i*4+2], d = this.tets[i*4+3];
+      const wa = this.invMass[a], wb = this.invMass[b], wc = this.invMass[c], wd = this.invMass[d];
+      if (wa + wb + wc + wd === 0) continue;
+
+      const ax = this.positions[a*3], ay = this.positions[a*3+1], az = this.positions[a*3+2];
+      const e1 = [this.positions[b*3]-ax, this.positions[b*3+1]-ay, this.positions[b*3+2]-az];
+      const e2 = [this.positions[c*3]-ax, this.positions[c*3+1]-ay, this.positions[c*3+2]-az];
+      const e3 = [this.positions[d*3]-ax, this.positions[d*3+1]-ay, this.positions[d*3+2]-az];
+      const D = [e1[0], e2[0], e3[0], e1[1], e2[1], e3[1], e1[2], e2[2], e3[2]];
+
+      const invRest = this.tetRestInvMatrices.subarray(i*9, i*9+9);
+      mat3Multiply(D, invRest, this._F);
+      extractRotation(this._F, this._R);
+
+      const stiffness = this.tetStiffness[i];
+      const localAlphaElastic = alphaElastic / stiffness;
+      const vol = this.tetRestVolumes[i];
+
+      const restEdges = [
+        [this.restPositions[b*3]-this.restPositions[a*3], this.restPositions[b*3+1]-this.restPositions[a*3+1], this.restPositions[b*3+2]-this.restPositions[a*3+2]],
+        [this.restPositions[c*3]-this.restPositions[a*3], this.restPositions[c*3+1]-this.restPositions[a*3+1], this.restPositions[c*3+2]-this.restPositions[a*3+2]],
+        [this.restPositions[d*3]-this.restPositions[a*3], this.restPositions[d*3+1]-this.restPositions[a*3+1], this.restPositions[d*3+2]-this.restPositions[a*3+2]],
+      ];
+      const R = this._R;
+      const rotatedEdges = restEdges.map(([ex, ey, ez]) => [
+        R[0]*ex + R[1]*ey + R[2]*ez,
+        R[3]*ex + R[4]*ey + R[5]*ez,
+        R[6]*ex + R[7]*ey + R[8]*ez,
+      ]);
+
+      const verts = [a, b, c, d];
+      const invMasses = [wa, wb, wc, wd];
+      const compliance = localAlphaElastic / dtSq;
+      const kStiff = 1 / (1 + compliance);
+
+      let corrAx = 0, corrAy = 0, corrAz = 0;
+      const corrections = [[0,0,0], [0,0,0], [0,0,0], [0,0,0]];
+      for (let k = 0; k < 3; k++) {
+        const vIdx = k + 1;
+        const curX = this.positions[verts[vIdx]*3]   - ax;
+        const curY = this.positions[verts[vIdx]*3+1] - ay;
+        const curZ = this.positions[verts[vIdx]*3+2] - az;
+        const diffX = (curX - rotatedEdges[k][0]) * kStiff;
+        const diffY = (curY - rotatedEdges[k][1]) * kStiff;
+        const diffZ = (curZ - rotatedEdges[k][2]) * kStiff;
+        const wSum = invMasses[vIdx] + wa;
+        if (wSum < 1e-9) continue;
+        const moveV = invMasses[vIdx] / wSum;
+        const moveA = wa / wSum;
+        corrections[vIdx][0] -= diffX * moveV;
+        corrections[vIdx][1] -= diffY * moveV;
+        corrections[vIdx][2] -= diffZ * moveV;
+        corrAx += diffX * moveA;
+        corrAy += diffY * moveA;
+        corrAz += diffZ * moveA;
+      }
+      corrections[0][0] += corrAx;
+      corrections[0][1] += corrAy;
+      corrections[0][2] += corrAz;
+
+      for (let k = 0; k < 4; k++) {
+        if (invMasses[k] === 0) continue;
+        this.positions[verts[k]*3]   += corrections[k][0] / 3;
+        this.positions[verts[k]*3+1] += corrections[k][1] / 3;
+        this.positions[verts[k]*3+2] += corrections[k][2] / 3;
+      }
+
+      const bx = this.positions[b*3]-this.positions[a*3], by = this.positions[b*3+1]-this.positions[a*3+1], bz = this.positions[b*3+2]-this.positions[a*3+2];
+      const cx2 = this.positions[c*3]-this.positions[a*3], cy2 = this.positions[c*3+1]-this.positions[a*3+1], cz2 = this.positions[c*3+2]-this.positions[a*3+2];
+      const dx2 = this.positions[d*3]-this.positions[a*3], dy2 = this.positions[d*3+1]-this.positions[a*3+1], dz2 = this.positions[d*3+2]-this.positions[a*3+2];
+      const crossCX = cy2*dz2 - cz2*dy2, crossCY = cz2*dx2 - cx2*dz2, crossCZ = cx2*dy2 - cy2*dx2;
+      const currentVol = (bx*crossCX + by*crossCY + bz*crossCZ) / 6;
+      const C = currentVol - vol;
+      const gradB = [ (cy2*dz2 - cz2*dy2)/6, (cz2*dx2 - cx2*dz2)/6, (cx2*dy2 - cy2*dx2)/6 ];
+      const gradC = [ (dy2*bz - dz2*by)/6, (dz2*bx - dx2*bz)/6, (dx2*by - dy2*bx)/6 ];
+      const gradDx = (by*cz2 - bz*cy2)/6, gradDy = (bz*cx2 - bx*cz2)/6, gradDz = (bx*cy2 - by*cx2)/6;
+      const gradAx = -(gradB[0]+gradC[0]+gradDx), gradAy = -(gradB[1]+gradC[1]+gradDy), gradAz = -(gradB[2]+gradC[2]+gradDz);
+
+      const wSumVol = wa*(gradAx*gradAx+gradAy*gradAy+gradAz*gradAz)
+                    + wb*(gradB[0]*gradB[0]+gradB[1]*gradB[1]+gradB[2]*gradB[2])
+                    + wc*(gradC[0]*gradC[0]+gradC[1]*gradC[1]+gradC[2]*gradC[2])
+                    + wd*(gradDx*gradDx+gradDy*gradDy+gradDz*gradDz);
+      const complianceVol = alphaVolume / dtSq;
+      if (wSumVol + complianceVol > 1e-9) {
+        const lambda = -C / (wSumVol + complianceVol);
+        this.positions[a*3]   += wa * gradAx * lambda;
+        this.positions[a*3+1] += wa * gradAy * lambda;
+        this.positions[a*3+2] += wa * gradAz * lambda;
+        this.positions[b*3]   += wb * gradB[0] * lambda;
+        this.positions[b*3+1] += wb * gradB[1] * lambda;
+        this.positions[b*3+2] += wb * gradB[2] * lambda;
+        this.positions[c*3]   += wc * gradC[0] * lambda;
+        this.positions[c*3+1] += wc * gradC[1] * lambda;
+        this.positions[c*3+2] += wc * gradC[2] * lambda;
+        this.positions[d*3]   += wd * gradDx * lambda;
+        this.positions[d*3+1] += wd * gradDy * lambda;
+        this.positions[d*3+2] += wd * gradDz * lambda;
+      }
+    }
+  }
+
+  _solveFloorContact(floorY) {
+    const n = this.particleCount;
+    const friction = 0.4;
+    for (let i = 0; i < n; i++) {
+      if (this.invMass[i] === 0) continue;
+      if (this.positions[i*3+1] < floorY) {
+        const penetration = floorY - this.positions[i*3+1];
+        this.positions[i*3+1] = floorY;
+        const dx = this.positions[i*3]   - this.prevPositions[i*3];
+        const dz = this.positions[i*3+2] - this.prevPositions[i*3+2];
+        this.positions[i*3]   -= dx * friction;
+        this.positions[i*3+2] -= dz * friction;
+      }
+    }
+  }
+
+  _applyEdgeDamping(damping) {
+    if (damping <= 0) return;
+    const t = this.tetCount;
+    const k = Math.min(0.5, damping * 0.5);
+    const edgePairs = [[0,1],[0,2],[0,3],[1,2],[1,3],[2,3]];
+    for (let i = 0; i < t; i++) {
+      const v = [this.tets[i*4], this.tets[i*4+1], this.tets[i*4+2], this.tets[i*4+3]];
+      for (const [p, q] of edgePairs) {
+        const a = v[p], b = v[q];
+        const wa = this.invMass[a], wb = this.invMass[b];
+        if (wa + wb === 0) continue;
+        const rvx = this.velocities[a*3]   - this.velocities[b*3];
+        const rvy = this.velocities[a*3+1] - this.velocities[b*3+1];
+        const rvz = this.velocities[a*3+2] - this.velocities[b*3+2];
+        const corrX = rvx * k, corrY = rvy * k, corrZ = rvz * k;
+        const moveA = wa / (wa + wb), moveB = wb / (wa + wb);
+        this.velocities[a*3]   -= corrX * moveA;
+        this.velocities[a*3+1] -= corrY * moveA;
+        this.velocities[a*3+2] -= corrZ * moveA;
+        this.velocities[b*3]   += corrX * moveB;
+        this.velocities[b*3+1] += corrY * moveB;
+        this.velocities[b*3+2] += corrZ * moveB;
+      }
+    }
+  }
+
+  computeStats() {
+    let volume = 0;
+    let restVolume = 0;
+    let kinetic = 0;
+    for (let i = 0; i < this.tetCount; i++) {
+      const a = this.tets[i*4], b = this.tets[i*4+1], c = this.tets[i*4+2], d = this.tets[i*4+3];
+      const bx = this.positions[b*3]-this.positions[a*3], by = this.positions[b*3+1]-this.positions[a*3+1], bz = this.positions[b*3+2]-this.positions[a*3+2];
+      const cx = this.positions[c*3]-this.positions[a*3], cy = this.positions[c*3+1]-this.positions[a*3+1], cz = this.positions[c*3+2]-this.positions[a*3+2];
+      const dx = this.positions[d*3]-this.positions[a*3], dy = this.positions[d*3+1]-this.positions[a*3+1], dz = this.positions[d*3+2]-this.positions[a*3+2];
+      const crossX = cy*dz-cz*dy, crossY = cz*dx-cx*dz, crossZ = cx*dy-cy*dx;
+      volume += Math.abs(bx*crossX+by*crossY+bz*crossZ) / 6;
+      restVolume += this.tetRestVolumes[i];
+    }
+    for (let i = 0; i < this.particleCount; i++) {
+      if (this.invMass[i] === 0) continue;
+      const mass = 1 / this.invMass[i];
+      const vx = this.velocities[i*3], vy = this.velocities[i*3+1], vz = this.velocities[i*3+2];
+      kinetic += 0.5 * mass * (vx*vx+vy*vy+vz*vz);
+    }
+    return {
+      mass: this._totalMass,
+      volumeRatio: restVolume > 0 ? volume / restVolume : 1,
+      kineticEnergy: kinetic,
+    };
+  }
+}
+
+class Clock {
+  constructor(hz = 60, maxCatchupSteps = 5) {
+    this.dt = 1 / hz;
+    this.accumulator = 0;
+    this.lastTime = null;
+    this.maxCatchupSteps = maxCatchupSteps;
+  }
+  tick(nowMs, stepFn) {
+    if (this.lastTime === null) { this.lastTime = nowMs; return; }
+    let frameTime = (nowMs - this.lastTime) / 1000;
+    this.lastTime = nowMs;
+    frameTime = Math.min(frameTime, this.dt * this.maxCatchupSteps);
+    this.accumulator += frameTime;
+    let steps = 0;
+    while (this.accumulator >= this.dt && steps < this.maxCatchupSteps) {
+      stepFn(this.dt);
+      this.accumulator -= this.dt;
+      steps++;
+    }
+  }
+}
+
 async function main() {
   try {
     await initWebGPU();
