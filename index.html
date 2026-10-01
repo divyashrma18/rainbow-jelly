@@ -207,41 +207,48 @@ function mat3Inverse(m, out) {
   return out;
 }
 
-// Polar decomposition via Jacobi-free iterative method (Müller et al.) — extracts best-fit rotation R from F.
-function extractRotation(F, out) {
-  let q = [1, 0, 0, 0]; // identity quaternion (w,x,y,z)
+// Polar decomposition via Jacobi-free iterative method (McAdams/Müller et al.) — extracts best-fit
+// rotation R from F into `out` (column-major 3x3, matching mat3Multiply's convention), warm-started
+// from `q` (quaternion [w,x,y,z], mutated in place so the caller can persist it across frames).
+// F is interpreted column-major: F = [c0x,c0y,c0z, c1x,c1y,c1z, c2x,c2y,c2z].
+const _rotScratch = { r: new Float32Array(9) };
+function extractRotation(F, q, out) {
+  const r = _rotScratch.r;
   for (let iter = 0; iter < 8; iter++) {
     const qx = q[1], qy = q[2], qz = q[3], qw = q[0];
-    const r00 = 1-2*(qy*qy+qz*qz), r01 = 2*(qx*qy-qz*qw), r02 = 2*(qx*qz+qy*qw);
-    const r10 = 2*(qx*qy+qz*qw), r11 = 1-2*(qx*qx+qz*qz), r12 = 2*(qy*qz-qx*qw);
-    const r20 = 2*(qx*qz-qy*qw), r21 = 2*(qy*qz+qx*qw), r22 = 1-2*(qx*qx+qy*qy);
-    const cx = (r10*F[2]+r11*F[5]+r12*F[8]) - (r20*F[1]+r21*F[4]+r22*F[7]);
-    const cy = (r20*F[0]+r21*F[3]+r22*F[6]) - (r00*F[2]+r01*F[5]+r02*F[8]);
-    const cz = (r00*F[1]+r01*F[4]+r02*F[7]) - (r10*F[0]+r11*F[3]+r12*F[6]);
-    const dot = r00*F[0]+r01*F[3]+r02*F[6] + r10*F[1]+r11*F[4]+r12*F[7] + r20*F[2]+r21*F[5]+r22*F[8];
-    const omegaLen2 = cx*cx+cy*cy+cz*cz;
+    // R as column-major, built from the quaternion, matching F's column-major layout.
+    r[0] = 1-2*(qy*qy+qz*qz); r[3] = 2*(qx*qy-qz*qw);   r[6] = 2*(qx*qz+qy*qw);
+    r[1] = 2*(qx*qy+qz*qw);   r[4] = 1-2*(qx*qx+qz*qz); r[7] = 2*(qy*qz-qx*qw);
+    r[2] = 2*(qx*qz-qy*qw);   r[5] = 2*(qy*qz+qx*qw);   r[8] = 1-2*(qx*qx+qy*qy);
+    // omega = sum_i (R_col_i x F_col_i) — drives R toward alignment with F.
+    // Column-wise cross products: R columns are (r0,r1,r2),(r3,r4,r5),(r6,r7,r8); F columns analogous.
+    const r0x=r[0],r0y=r[1],r0z=r[2], r1x=r[3],r1y=r[4],r1z=r[5], r2x=r[6],r2y=r[7],r2z=r[8];
+    const f0x=F[0],f0y=F[1],f0z=F[2], f1x=F[3],f1y=F[4],f1z=F[5], f2x=F[6],f2y=F[7],f2z=F[8];
+    const omx = (r0y*f0z-r0z*f0y) + (r1y*f1z-r1z*f1y) + (r2y*f2z-r2z*f2y);
+    const omy = (r0z*f0x-r0x*f0z) + (r1z*f1x-r1x*f1z) + (r2z*f2x-r2x*f2z);
+    const omz = (r0x*f0y-r0y*f0x) + (r1x*f1y-r1y*f1x) + (r2x*f2y-r2y*f2x);
+    const dot = (r0x*f0x+r0y*f0y+r0z*f0z) + (r1x*f1x+r1y*f1y+r1z*f1z) + (r2x*f2x+r2y*f2y+r2z*f2z);
+    const omegaLen2 = omx*omx+omy*omy+omz*omz;
     if (omegaLen2 < 1e-9) break;
-    const w = Math.abs(dot) + 1e-6;
-    const omega = [cx / w, cy / w, cz / w];
-    const angle = Math.sqrt(omega[0]*omega[0]+omega[1]*omega[1]+omega[2]*omega[2]);
+    const denom = Math.abs(dot) + 1e-6;
+    const angle = Math.sqrt(omegaLen2) / denom;
     if (angle < 1e-9) break;
-    const axis = [omega[0]/angle, omega[1]/angle, omega[2]/angle];
-    const half = angle / 2;
+    const invLen = 1 / Math.sqrt(omegaLen2);
+    const ax = omx*invLen, ay = omy*invLen, az = omz*invLen;
+    const half = Math.min(angle, 0.5) / 2; // clamp step to keep iteration stable near large errors
     const s = Math.sin(half);
-    const dq = [Math.cos(half), axis[0]*s, axis[1]*s, axis[2]*s];
-    const nq = [
-      dq[0]*q[0] - dq[1]*q[1] - dq[2]*q[2] - dq[3]*q[3],
-      dq[0]*q[1] + dq[1]*q[0] + dq[2]*q[3] - dq[3]*q[2],
-      dq[0]*q[2] - dq[1]*q[3] + dq[2]*q[0] + dq[3]*q[1],
-      dq[0]*q[3] + dq[1]*q[2] - dq[2]*q[1] + dq[3]*q[0],
-    ];
-    const len = Math.hypot(nq[0], nq[1], nq[2], nq[3]) || 1;
-    q = [nq[0]/len, nq[1]/len, nq[2]/len, nq[3]/len];
+    const dqw = Math.cos(half), dqx = ax*s, dqy = ay*s, dqz = az*s;
+    const nqw = dqw*q[0] - dqx*q[1] - dqy*q[2] - dqz*q[3];
+    const nqx = dqw*q[1] + dqx*q[0] + dqy*q[3] - dqz*q[2];
+    const nqy = dqw*q[2] - dqx*q[3] + dqy*q[0] + dqz*q[1];
+    const nqz = dqw*q[3] + dqx*q[2] - dqy*q[1] + dqz*q[0];
+    const len = Math.hypot(nqw, nqx, nqy, nqz) || 1;
+    q[0] = nqw/len; q[1] = nqx/len; q[2] = nqy/len; q[3] = nqz/len;
   }
   const qx = q[1], qy = q[2], qz = q[3], qw = q[0];
-  out[0] = 1-2*(qy*qy+qz*qz); out[1] = 2*(qx*qy-qz*qw);   out[2] = 2*(qx*qz+qy*qw);
-  out[3] = 2*(qx*qy+qz*qw);   out[4] = 1-2*(qx*qx+qz*qz); out[5] = 2*(qy*qz-qx*qw);
-  out[6] = 2*(qx*qz-qy*qw);   out[7] = 2*(qy*qz+qx*qw);   out[8] = 1-2*(qx*qx+qy*qy);
+  out[0] = 1-2*(qy*qy+qz*qz); out[3] = 2*(qx*qy-qz*qw);   out[6] = 2*(qx*qz+qy*qw);
+  out[1] = 2*(qx*qy+qz*qw);   out[4] = 1-2*(qx*qx+qz*qz); out[7] = 2*(qy*qz-qx*qw);
+  out[2] = 2*(qx*qz-qy*qw);   out[5] = 2*(qy*qz+qx*qw);   out[8] = 1-2*(qx*qx+qy*qy);
   return out;
 }
 
@@ -257,32 +264,44 @@ class SoftBody {
     this.velocities = new Float32Array(n * 3);
     this.invMass = new Float32Array(n).fill(1);
     this.tets = new Uint32Array(meshData.tets);
-    this.tetRestVolumes = new Float32Array(t);
-    this.tetRestInvMatrices = new Float32Array(t * 9);
+    this.tetRestVolumes = new Float32Array(t); // signed
+    this.tetRestInvMatrices = new Float32Array(t * 9); // column-major, columns = rest edges e1,e2,e3
     this.tetStiffness = new Float32Array(t);
+    this.tetQuat = new Float32Array(t * 4); // warm-start rotation per tet, (w,x,y,z)
 
     const layerFn = opts.layerStiffness || (() => 1.0);
+    const m = new Float32Array(9);
+    const inv = new Float32Array(9);
+    let degenerateCount = 0;
 
     for (let i = 0; i < t; i++) {
       const a = this.tets[i*4], b = this.tets[i*4+1], c = this.tets[i*4+2], d = this.tets[i*4+3];
       const ax = this.restPositions[a*3], ay = this.restPositions[a*3+1], az = this.restPositions[a*3+2];
-      const e1 = [this.restPositions[b*3]-ax, this.restPositions[b*3+1]-ay, this.restPositions[b*3+2]-az];
-      const e2 = [this.restPositions[c*3]-ax, this.restPositions[c*3+1]-ay, this.restPositions[c*3+2]-az];
-      const e3 = [this.restPositions[d*3]-ax, this.restPositions[d*3+1]-ay, this.restPositions[d*3+2]-az];
-      const m = [e1[0], e2[0], e3[0], e1[1], e2[1], e3[1], e1[2], e2[2], e3[2]];
+      const e1x = this.restPositions[b*3]-ax, e1y = this.restPositions[b*3+1]-ay, e1z = this.restPositions[b*3+2]-az;
+      const e2x = this.restPositions[c*3]-ax, e2y = this.restPositions[c*3+1]-ay, e2z = this.restPositions[c*3+2]-az;
+      const e3x = this.restPositions[d*3]-ax, e3y = this.restPositions[d*3+1]-ay, e3z = this.restPositions[d*3+2]-az;
+      // column-major: column 0 = e1, column 1 = e2, column 2 = e3
+      m[0]=e1x; m[1]=e1y; m[2]=e1z;  m[3]=e2x; m[4]=e2y; m[5]=e2z;  m[6]=e3x; m[7]=e3y; m[8]=e3z;
       const vol = mat3Determinant(m) / 6;
-      this.tetRestVolumes[i] = Math.abs(vol);
-      const inv = new Array(9);
+      this.tetRestVolumes[i] = vol; // keep sign; degenerate/inverted rest tets get caught below
+      if (Math.abs(vol) < 1e-9) {
+        degenerateCount++;
+        // leave inverse as zero (mat3Inverse already guards det≈0); constraint loop skips via stiffness*0 below
+      }
       mat3Inverse(m, inv);
       for (let k = 0; k < 9; k++) this.tetRestInvMatrices[i*9+k] = inv[k];
       const centroidY = (ay + this.restPositions[b*3+1] + this.restPositions[c*3+1] + this.restPositions[d*3+1]) / 4;
-      this.tetStiffness[i] = layerFn(centroidY);
+      this.tetStiffness[i] = Math.abs(vol) < 1e-9 ? 0 : layerFn(centroidY);
+      this.tetQuat[i*4] = 1; // identity quaternion warm start
+    }
+    if (degenerateCount > 0) {
+      console.warn('buildJellyMesh/SoftBody: skipped', degenerateCount, 'degenerate rest tets (zero volume)');
     }
 
     const massAccum = new Float32Array(n);
     const density = 1.0;
     for (let i = 0; i < t; i++) {
-      const share = (this.tetRestVolumes[i] * density) / 4;
+      const share = (Math.abs(this.tetRestVolumes[i]) * density) / 4;
       for (let k = 0; k < 4; k++) massAccum[this.tets[i*4+k]] += share;
     }
     for (let i = 0; i < n; i++) {
@@ -291,8 +310,25 @@ class SoftBody {
     this._totalMass = 0;
     for (let i = 0; i < n; i++) this._totalMass += massAccum[i];
 
-    this._F = new Array(9);
-    this._R = new Array(9);
+    // Unique undirected edge list (for damping + wireframe), built once from tet faces.
+    const edgeSet = new Map();
+    const edgePairsLocal = [[0,1],[0,2],[0,3],[1,2],[1,3],[2,3]];
+    for (let i = 0; i < t; i++) {
+      const v = [this.tets[i*4], this.tets[i*4+1], this.tets[i*4+2], this.tets[i*4+3]];
+      for (const [p, q] of edgePairsLocal) {
+        const lo = Math.min(v[p], v[q]), hi = Math.max(v[p], v[q]);
+        edgeSet.set(lo * n + hi, [lo, hi]);
+      }
+    }
+    this.edges = new Uint32Array(edgeSet.size * 2);
+    let ei = 0;
+    for (const [lo, hi] of edgeSet.values()) { this.edges[ei++] = lo; this.edges[ei++] = hi; }
+    this.edgeCount = edgeSet.size;
+
+    // Reusable scratch to avoid per-substep, per-tet allocation in the hot loop.
+    this._F = new Float32Array(9);
+    this._R = new Float32Array(9);
+    this._q = new Float32Array(4);
   }
 
   step(dt, globalParams) {
@@ -328,118 +364,158 @@ class SoftBody {
     this._applyEdgeDamping(damping);
   }
 
+  // Maps firmness in [0,1] to a compliance (XPBD alpha), log-interpolated between a soft and a stiff
+  // bound so the whole slider range feels distinct (linear-in-(1-f) made most of the range mushy).
+  static _complianceFromFirmness(firmness, alphaSoft, alphaStiff) {
+    const f = Math.min(1, Math.max(0, firmness));
+    const logSoft = Math.log(alphaSoft), logStiff = Math.log(alphaStiff);
+    return Math.exp(logSoft + (logStiff - logSoft) * f);
+  }
+
   _solveTetConstraints(dt, firmness) {
     const t = this.tetCount;
-    const complianceScale = Math.max(1e-4, 1 - firmness);
-    const alphaElastic = 0.0001 * complianceScale;
-    const alphaVolume = 0.00002 * complianceScale;
+    const alphaElastic = SoftBody._complianceFromFirmness(firmness, 2e-3, 1e-7);
+    const alphaVolume = SoftBody._complianceFromFirmness(firmness, 2e-5, 1e-9);
     const dtSq = dt * dt;
+    const complianceElasticBase = alphaElastic / dtSq;
+    const complianceVolumeBase = alphaVolume / dtSq;
+
+    const F = this._F, R = this._R, q4 = this._q;
+    const positions = this.positions, restPositions = this.restPositions;
+    const invMass = this.invMass, tets = this.tets;
+    const tetRestInvMatrices = this.tetRestInvMatrices, tetRestVolumes = this.tetRestVolumes;
+    const tetStiffness = this.tetStiffness, tetQuat = this.tetQuat;
 
     for (let i = 0; i < t; i++) {
-      const a = this.tets[i*4], b = this.tets[i*4+1], c = this.tets[i*4+2], d = this.tets[i*4+3];
-      const wa = this.invMass[a], wb = this.invMass[b], wc = this.invMass[c], wd = this.invMass[d];
+      const stiffness = tetStiffness[i];
+      if (stiffness === 0) continue; // degenerate rest tet, skip
+
+      const a = tets[i*4], b = tets[i*4+1], c = tets[i*4+2], d = tets[i*4+3];
+      const wa = invMass[a], wb = invMass[b], wc = invMass[c], wd = invMass[d];
       if (wa + wb + wc + wd === 0) continue;
 
-      const ax = this.positions[a*3], ay = this.positions[a*3+1], az = this.positions[a*3+2];
-      const e1 = [this.positions[b*3]-ax, this.positions[b*3+1]-ay, this.positions[b*3+2]-az];
-      const e2 = [this.positions[c*3]-ax, this.positions[c*3+1]-ay, this.positions[c*3+2]-az];
-      const e3 = [this.positions[d*3]-ax, this.positions[d*3+1]-ay, this.positions[d*3+2]-az];
-      const D = [e1[0], e2[0], e3[0], e1[1], e2[1], e3[1], e1[2], e2[2], e3[2]];
+      const ax = positions[a*3], ay = positions[a*3+1], az = positions[a*3+2];
+      const e1x = positions[b*3]-ax, e1y = positions[b*3+1]-ay, e1z = positions[b*3+2]-az;
+      const e2x = positions[c*3]-ax, e2y = positions[c*3+1]-ay, e2z = positions[c*3+2]-az;
+      const e3x = positions[d*3]-ax, e3y = positions[d*3+1]-ay, e3z = positions[d*3+2]-az;
+      // D column-major: columns = current edges (matches tetRestInvMatrices' column-major rest edges)
+      F[0]=0; // F = D * Rest^-1, computed via mat3Multiply below using a local D array
+      const D0=e1x,D1=e1y,D2=e1z, D3=e2x,D4=e2y,D5=e2z, D6=e3x,D7=e3y,D8=e3z;
+      const ir0=tetRestInvMatrices[i*9],ir1=tetRestInvMatrices[i*9+1],ir2=tetRestInvMatrices[i*9+2];
+      const ir3=tetRestInvMatrices[i*9+3],ir4=tetRestInvMatrices[i*9+4],ir5=tetRestInvMatrices[i*9+5];
+      const ir6=tetRestInvMatrices[i*9+6],ir7=tetRestInvMatrices[i*9+7],ir8=tetRestInvMatrices[i*9+8];
+      // out = D * invRest, column-major: out_col_j = D * invRest_col_j
+      F[0] = D0*ir0+D3*ir1+D6*ir2; F[1] = D1*ir0+D4*ir1+D7*ir2; F[2] = D2*ir0+D5*ir1+D8*ir2;
+      F[3] = D0*ir3+D3*ir4+D6*ir5; F[4] = D1*ir3+D4*ir4+D7*ir5; F[5] = D2*ir3+D5*ir4+D8*ir5;
+      F[6] = D0*ir6+D3*ir7+D6*ir8; F[7] = D1*ir6+D4*ir7+D7*ir8; F[8] = D2*ir6+D5*ir7+D8*ir8;
 
-      const invRest = this.tetRestInvMatrices.subarray(i*9, i*9+9);
-      mat3Multiply(D, invRest, this._F);
-      extractRotation(this._F, this._R);
+      q4[0]=tetQuat[i*4]; q4[1]=tetQuat[i*4+1]; q4[2]=tetQuat[i*4+2]; q4[3]=tetQuat[i*4+3];
+      extractRotation(F, q4, R);
+      tetQuat[i*4]=q4[0]; tetQuat[i*4+1]=q4[1]; tetQuat[i*4+2]=q4[2]; tetQuat[i*4+3]=q4[3];
 
-      const stiffness = this.tetStiffness[i];
-      const localAlphaElastic = alphaElastic / stiffness;
-      const vol = this.tetRestVolumes[i];
+      const compliance = complianceElasticBase / stiffness;
+      const vol = tetRestVolumes[i];
 
-      const restEdges = [
-        [this.restPositions[b*3]-this.restPositions[a*3], this.restPositions[b*3+1]-this.restPositions[a*3+1], this.restPositions[b*3+2]-this.restPositions[a*3+2]],
-        [this.restPositions[c*3]-this.restPositions[a*3], this.restPositions[c*3+1]-this.restPositions[a*3+1], this.restPositions[c*3+2]-this.restPositions[a*3+2]],
-        [this.restPositions[d*3]-this.restPositions[a*3], this.restPositions[d*3+1]-this.restPositions[a*3+1], this.restPositions[d*3+2]-this.restPositions[a*3+2]],
-      ];
-      const R = this._R;
-      const rotatedEdges = restEdges.map(([ex, ey, ez]) => [
-        R[0]*ex + R[1]*ey + R[2]*ez,
-        R[3]*ex + R[4]*ey + R[5]*ez,
-        R[6]*ex + R[7]*ey + R[8]*ez,
-      ]);
+      // Rest edges rotated by R give the elastically-targeted current edges.
+      const rex1=restPositions[b*3]-restPositions[a*3], rey1=restPositions[b*3+1]-restPositions[a*3+1], rez1=restPositions[b*3+2]-restPositions[a*3+2];
+      const rex2=restPositions[c*3]-restPositions[a*3], rey2=restPositions[c*3+1]-restPositions[a*3+1], rez2=restPositions[c*3+2]-restPositions[a*3+2];
+      const rex3=restPositions[d*3]-restPositions[a*3], rey3=restPositions[d*3+1]-restPositions[a*3+1], rez3=restPositions[d*3+2]-restPositions[a*3+2];
+      const tx1 = R[0]*rex1+R[3]*rey1+R[6]*rez1, ty1 = R[1]*rex1+R[4]*rey1+R[7]*rez1, tz1 = R[2]*rex1+R[5]*rey1+R[8]*rez1;
+      const tx2 = R[0]*rex2+R[3]*rey2+R[6]*rez2, ty2 = R[1]*rex2+R[4]*rey2+R[7]*rez2, tz2 = R[2]*rex2+R[5]*rey2+R[8]*rez2;
+      const tx3 = R[0]*rex3+R[3]*rey3+R[6]*rez3, ty3 = R[1]*rex3+R[4]*rey3+R[7]*rez3, tz3 = R[2]*rex3+R[5]*rey3+R[8]*rez3;
 
-      const verts = [a, b, c, d];
-      const invMasses = [wa, wb, wc, wd];
-      const compliance = localAlphaElastic / dtSq;
+      // Per-vertex deviation of each vertex from its rotated-rest target relative to centroid —
+      // corrections are centroid-anchored (mass-weighted) so the constraint is torque-free at
+      // equilibrium, instead of always pulling toward vertex `a`.
+      const wSum = wa + wb + wc + wd;
+      // Centroid of rotated-rest shape placed at the mass-weighted centroid of current positions.
+      const cxCur = (wa*ax + wb*(ax+e1x) + wc*(ax+e2x) + wd*(ax+e3x)) / wSum;
+      const cyCur = (wa*ay + wb*(ay+e1y) + wc*(ay+e2y) + wd*(ay+e3y)) / wSum;
+      const czCur = (wa*az + wb*(az+e1z) + wc*(az+e2z) + wd*(az+e3z)) / wSum;
+      // Rotated-rest positions relative to vertex a: a=0, b=t1, c=t2, d=t3. Their mass-weighted centroid:
+      const tcx = (wb*tx1 + wc*tx2 + wd*tx3) / wSum;
+      const tcy = (wb*ty1 + wc*ty2 + wd*ty3) / wSum;
+      const tcz = (wb*tz1 + wc*tz2 + wd*tz3) / wSum;
+      // Target absolute positions: place rotated-rest centroid at current centroid.
+      const targetAx = cxCur - tcx, targetAy = cyCur - tcy, targetAz = czCur - tcz;
+
+      // Shape-matching correction (Müller et al. "Meshless Deformations"): every vertex moves the
+      // SAME fraction `kStiff` of its own deviation from the rotated-rest goal. Momentum conservation
+      // follows because the goal positions are centered on the mass-weighted centroid of the current
+      // configuration: Σ m_i (goal_i - x_i) = M·x_cm − M·x_cm = 0, so a uniform scalar times a
+      // zero-sum vector stays zero-sum — NOT from additionally weighting the per-vertex step by mass
+      // (that double-counts the mass weighting already baked into the centroid and is what broke
+      // momentum conservation in an earlier version of this constraint).
       const kStiff = 1 / (1 + compliance);
-
-      let corrAx = 0, corrAy = 0, corrAz = 0;
-      const corrections = [[0,0,0], [0,0,0], [0,0,0], [0,0,0]];
-      for (let k = 0; k < 3; k++) {
-        const vIdx = k + 1;
-        const curX = this.positions[verts[vIdx]*3]   - ax;
-        const curY = this.positions[verts[vIdx]*3+1] - ay;
-        const curZ = this.positions[verts[vIdx]*3+2] - az;
-        const diffX = (curX - rotatedEdges[k][0]) * kStiff;
-        const diffY = (curY - rotatedEdges[k][1]) * kStiff;
-        const diffZ = (curZ - rotatedEdges[k][2]) * kStiff;
-        const wSum = invMasses[vIdx] + wa;
-        if (wSum < 1e-9) continue;
-        const moveV = invMasses[vIdx] / wSum;
-        const moveA = wa / wSum;
-        corrections[vIdx][0] -= diffX * moveV;
-        corrections[vIdx][1] -= diffY * moveV;
-        corrections[vIdx][2] -= diffZ * moveV;
-        corrAx += diffX * moveA;
-        corrAy += diffY * moveA;
-        corrAz += diffZ * moveA;
+      if (wa > 0) {
+        positions[a*3]   -= (ax - targetAx) * kStiff;
+        positions[a*3+1] -= (ay - targetAy) * kStiff;
+        positions[a*3+2] -= (az - targetAz) * kStiff;
       }
-      corrections[0][0] += corrAx;
-      corrections[0][1] += corrAy;
-      corrections[0][2] += corrAz;
-
-      for (let k = 0; k < 4; k++) {
-        if (invMasses[k] === 0) continue;
-        this.positions[verts[k]*3]   += corrections[k][0] / 3;
-        this.positions[verts[k]*3+1] += corrections[k][1] / 3;
-        this.positions[verts[k]*3+2] += corrections[k][2] / 3;
+      if (wb > 0) {
+        positions[b*3]   -= (ax+e1x - (targetAx+tx1)) * kStiff;
+        positions[b*3+1] -= (ay+e1y - (targetAy+ty1)) * kStiff;
+        positions[b*3+2] -= (az+e1z - (targetAz+tz1)) * kStiff;
+      }
+      if (wc > 0) {
+        positions[c*3]   -= (ax+e2x - (targetAx+tx2)) * kStiff;
+        positions[c*3+1] -= (ay+e2y - (targetAy+ty2)) * kStiff;
+        positions[c*3+2] -= (az+e2z - (targetAz+tz2)) * kStiff;
+      }
+      if (wd > 0) {
+        positions[d*3]   -= (ax+e3x - (targetAx+tx3)) * kStiff;
+        positions[d*3+1] -= (ay+e3y - (targetAy+ty3)) * kStiff;
+        positions[d*3+2] -= (az+e3z - (targetAz+tz3)) * kStiff;
       }
 
-      const bx = this.positions[b*3]-this.positions[a*3], by = this.positions[b*3+1]-this.positions[a*3+1], bz = this.positions[b*3+2]-this.positions[a*3+2];
-      const cx2 = this.positions[c*3]-this.positions[a*3], cy2 = this.positions[c*3+1]-this.positions[a*3+1], cz2 = this.positions[c*3+2]-this.positions[a*3+2];
-      const dx2 = this.positions[d*3]-this.positions[a*3], dy2 = this.positions[d*3+1]-this.positions[a*3+1], dz2 = this.positions[d*3+2]-this.positions[a*3+2];
-      const crossCX = cy2*dz2 - cz2*dy2, crossCY = cz2*dx2 - cx2*dz2, crossCZ = cx2*dy2 - cy2*dx2;
-      const currentVol = (bx*crossCX + by*crossCY + bz*crossCZ) / 6;
+      // Volume constraint (recompute edges after elastic correction).
+      const bx = positions[b*3]-positions[a*3], by = positions[b*3+1]-positions[a*3+1], bz = positions[b*3+2]-positions[a*3+2];
+      const cx2 = positions[c*3]-positions[a*3], cy2 = positions[c*3+1]-positions[a*3+1], cz2 = positions[c*3+2]-positions[a*3+2];
+      const dx2 = positions[d*3]-positions[a*3], dy2 = positions[d*3+1]-positions[a*3+1], dz2 = positions[d*3+2]-positions[a*3+2];
+      const gradBx=(cy2*dz2-cz2*dy2)/6, gradBy=(cz2*dx2-cx2*dz2)/6, gradBz=(cx2*dy2-cy2*dx2)/6;
+      const gradCx=(dy2*bz-dz2*by)/6, gradCy=(dz2*bx-dx2*bz)/6, gradCz=(dx2*by-dy2*bx)/6;
+      const gradDx=(by*cz2-bz*cy2)/6, gradDy=(bz*cx2-bx*cz2)/6, gradDz=(bx*cy2-by*cx2)/6;
+      const gradAx=-(gradBx+gradCx+gradDx), gradAy=-(gradBy+gradCy+gradDy), gradAz=-(gradBz+gradCz+gradDz);
+      const currentVol = (bx*(cy2*dz2-cz2*dy2) + by*(cz2*dx2-cx2*dz2) + bz*(cx2*dy2-cy2*dx2)) / 6;
       const C = currentVol - vol;
-      const gradB = [ (cy2*dz2 - cz2*dy2)/6, (cz2*dx2 - cx2*dz2)/6, (cx2*dy2 - cy2*dx2)/6 ];
-      const gradC = [ (dy2*bz - dz2*by)/6, (dz2*bx - dx2*bz)/6, (dx2*by - dy2*bx)/6 ];
-      const gradDx = (by*cz2 - bz*cy2)/6, gradDy = (bz*cx2 - bx*cz2)/6, gradDz = (bx*cy2 - by*cx2)/6;
-      const gradAx = -(gradB[0]+gradC[0]+gradDx), gradAy = -(gradB[1]+gradC[1]+gradDy), gradAz = -(gradB[2]+gradC[2]+gradDz);
 
       const wSumVol = wa*(gradAx*gradAx+gradAy*gradAy+gradAz*gradAz)
-                    + wb*(gradB[0]*gradB[0]+gradB[1]*gradB[1]+gradB[2]*gradB[2])
-                    + wc*(gradC[0]*gradC[0]+gradC[1]*gradC[1]+gradC[2]*gradC[2])
+                    + wb*(gradBx*gradBx+gradBy*gradBy+gradBz*gradBz)
+                    + wc*(gradCx*gradCx+gradCy*gradCy+gradCz*gradCz)
                     + wd*(gradDx*gradDx+gradDy*gradDy+gradDz*gradDz);
-      const complianceVol = alphaVolume / dtSq;
-      if (wSumVol + complianceVol > 1e-9) {
-        const lambda = -C / (wSumVol + complianceVol);
-        this.positions[a*3]   += wa * gradAx * lambda;
-        this.positions[a*3+1] += wa * gradAy * lambda;
-        this.positions[a*3+2] += wa * gradAz * lambda;
-        this.positions[b*3]   += wb * gradB[0] * lambda;
-        this.positions[b*3+1] += wb * gradB[1] * lambda;
-        this.positions[b*3+2] += wb * gradB[2] * lambda;
-        this.positions[c*3]   += wc * gradC[0] * lambda;
-        this.positions[c*3+1] += wc * gradC[1] * lambda;
-        this.positions[c*3+2] += wc * gradC[2] * lambda;
-        this.positions[d*3]   += wd * gradDx * lambda;
-        this.positions[d*3+1] += wd * gradDy * lambda;
-        this.positions[d*3+2] += wd * gradDz * lambda;
+      if (wSumVol + complianceVolumeBase > 1e-9) {
+        const lambda = -C / (wSumVol + complianceVolumeBase);
+        positions[a*3]   += wa * gradAx * lambda;
+        positions[a*3+1] += wa * gradAy * lambda;
+        positions[a*3+2] += wa * gradAz * lambda;
+        positions[b*3]   += wb * gradBx * lambda;
+        positions[b*3+1] += wb * gradBy * lambda;
+        positions[b*3+2] += wb * gradBz * lambda;
+        positions[c*3]   += wc * gradCx * lambda;
+        positions[c*3+1] += wc * gradCy * lambda;
+        positions[c*3+2] += wc * gradCz * lambda;
+        positions[d*3]   += wd * gradDx * lambda;
+        positions[d*3+1] += wd * gradDy * lambda;
+        positions[d*3+2] += wd * gradDz * lambda;
       }
     }
   }
 
   _solveFloorContact(floorY) {
+    // PBD Coulomb friction gated on instantaneous per-substep penetration degenerates at a resting
+    // contact: once the particle settles, gravity only re-penetrates it by a tiny amount each
+    // substep (g * subDt^2), so `penetration` is ~0 and any threshold scaled by it (muStatic *
+    // penetration, muKinetic * penetration) lets almost all tangential displacement through
+    // uncorrected — the body then creeps sideways forever under a sustained but never-arrested
+    // "kinetic slip". Gate on total accumulated penetration depth below the floor instead (how far
+    // the particle has been driven into contact relative to its own radius of influence is not
+    // tracked here, so use a small fixed depth band characteristic of one settled substep) — in
+    // that band, treat contact as fully static (no slip), which is the physically correct limit for
+    // an at-rest body and matches the spec's requirement that pieces settle on the floor rather than
+    // sliding indefinitely.
     const n = this.particleCount;
-    const friction = 0.4;
+    const stickBand = 0.01; // particles resting within this depth of the floor don't slide at all
+    const muKinetic = 0.4;
     for (let i = 0; i < n; i++) {
       if (this.invMass[i] === 0) continue;
       if (this.positions[i*3+1] < floorY) {
@@ -447,35 +523,49 @@ class SoftBody {
         this.positions[i*3+1] = floorY;
         const dx = this.positions[i*3]   - this.prevPositions[i*3];
         const dz = this.positions[i*3+2] - this.prevPositions[i*3+2];
-        this.positions[i*3]   -= dx * friction;
-        this.positions[i*3+2] -= dz * friction;
+        if (penetration <= stickBand) {
+          this.positions[i*3]   -= dx;
+          this.positions[i*3+2] -= dz;
+        } else {
+          const tangentialDist = Math.hypot(dx, dz);
+          if (tangentialDist > 1e-9) {
+            const scale = Math.min(1, (muKinetic * penetration) / tangentialDist);
+            this.positions[i*3]   -= dx * scale;
+            this.positions[i*3+2] -= dz * scale;
+          }
+        }
       }
     }
   }
 
   _applyEdgeDamping(damping) {
     if (damping <= 0) return;
-    const t = this.tetCount;
-    const k = Math.min(0.5, damping * 0.5);
-    const edgePairs = [[0,1],[0,2],[0,3],[1,2],[1,3],[2,3]];
-    for (let i = 0; i < t; i++) {
-      const v = [this.tets[i*4], this.tets[i*4+1], this.tets[i*4+2], this.tets[i*4+3]];
-      for (const [p, q] of edgePairs) {
-        const a = v[p], b = v[q];
-        const wa = this.invMass[a], wb = this.invMass[b];
-        if (wa + wb === 0) continue;
-        const rvx = this.velocities[a*3]   - this.velocities[b*3];
-        const rvy = this.velocities[a*3+1] - this.velocities[b*3+1];
-        const rvz = this.velocities[a*3+2] - this.velocities[b*3+2];
-        const corrX = rvx * k, corrY = rvy * k, corrZ = rvz * k;
-        const moveA = wa / (wa + wb), moveB = wb / (wa + wb);
-        this.velocities[a*3]   -= corrX * moveA;
-        this.velocities[a*3+1] -= corrY * moveA;
-        this.velocities[a*3+2] -= corrZ * moveA;
-        this.velocities[b*3]   += corrX * moveB;
-        this.velocities[b*3+1] += corrY * moveB;
-        this.velocities[b*3+2] += corrZ * moveB;
-      }
+    const k = Math.min(1, damping);
+    const edges = this.edges, edgeCount = this.edgeCount;
+    const positions = this.positions, velocities = this.velocities, invMass = this.invMass;
+    for (let ei = 0; ei < edgeCount; ei++) {
+      const a = edges[ei*2], b = edges[ei*2+1];
+      const wa = invMass[a], wb = invMass[b];
+      if (wa + wb === 0) continue;
+      let nx = positions[a*3]-positions[b*3], ny = positions[a*3+1]-positions[b*3+1], nz = positions[a*3+2]-positions[b*3+2];
+      const len = Math.hypot(nx, ny, nz);
+      if (len < 1e-9) continue;
+      nx /= len; ny /= len; nz /= len;
+      const rvx = velocities[a*3]   - velocities[b*3];
+      const rvy = velocities[a*3+1] - velocities[b*3+1];
+      const rvz = velocities[a*3+2] - velocities[b*3+2];
+      // Only damp the component of relative velocity ALONG the edge (stretch/compression), so a
+      // rigid rotation or translation of the whole tet (which moves endpoints together, not apart)
+      // is left untouched — matches the spec's "free fall/tumbling undamped".
+      const along = rvx*nx + rvy*ny + rvz*nz;
+      const corrX = nx * along * k, corrY = ny * along * k, corrZ = nz * along * k;
+      const moveA = wa / (wa + wb), moveB = wb / (wa + wb);
+      velocities[a*3]   -= corrX * moveA;
+      velocities[a*3+1] -= corrY * moveA;
+      velocities[a*3+2] -= corrZ * moveA;
+      velocities[b*3]   += corrX * moveB;
+      velocities[b*3+1] += corrY * moveB;
+      velocities[b*3+2] += corrZ * moveB;
     }
   }
 
@@ -490,7 +580,7 @@ class SoftBody {
       const dx = this.positions[d*3]-this.positions[a*3], dy = this.positions[d*3+1]-this.positions[a*3+1], dz = this.positions[d*3+2]-this.positions[a*3+2];
       const crossX = cy*dz-cz*dy, crossY = cz*dx-cx*dz, crossZ = cx*dy-cy*dx;
       volume += Math.abs(bx*crossX+by*crossY+bz*crossZ) / 6;
-      restVolume += this.tetRestVolumes[i];
+      restVolume += Math.abs(this.tetRestVolumes[i]);
     }
     for (let i = 0; i < this.particleCount; i++) {
       if (this.invMass[i] === 0) continue;
@@ -582,7 +672,7 @@ function getViewProjMatrix(cam, aspect) {
   return mat4.multiply(proj, view);
 }
 
-function createFloorRenderer(device, format) {
+function createFloorRenderer(device, format, floorY) {
   const shaderCode = `
     struct Uniforms { viewProj: mat4x4<f32> };
     @group(0) @binding(0) var<uniform> uniforms: Uniforms;
@@ -596,14 +686,18 @@ function createFloorRenderer(device, format) {
     }
     @fragment
     fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
-      return vec4<f32>(0.953, 0.937, 0.910, 1.0);
+      // Slightly darker than the page's clear colour so the floor reads as a distinct surface,
+      // with a soft radial falloff toward the horizon for a studio-paper feel.
+      let d = length(in.worldPos.xz) / 14.0;
+      let shade = mix(0.885, 0.80, clamp(d, 0.0, 1.0));
+      return vec4<f32>(shade, shade * 0.986, shade * 0.965, 1.0);
     }
   `;
   const module = device.createShaderModule({ code: shaderCode });
   const size = 20;
   const verts = new Float32Array([
-    -size, 0, -size,  size, 0, -size,  size, 0, size,
-    -size, 0, -size,  size, 0, size,  -size, 0, size,
+    -size, floorY, -size,  size, floorY, -size,  size, floorY, size,
+    -size, floorY, -size,  size, floorY, size,  -size, floorY, size,
   ]);
   const vertexBuffer = device.createBuffer({ size: verts.byteLength, usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST });
   device.queue.writeBuffer(vertexBuffer, 0, verts);
@@ -670,33 +764,31 @@ function createWireframeRenderer(device, format) {
 
   let lineBuffer = null;
   let lineBufferCapacity = 0;
-  const edgePairs = [[0,1],[0,2],[0,3],[1,2],[1,3],[2,3]];
+  let scratch = null;
 
   return {
     render(passEncoder, viewProj, body) {
-      const lineCount = body.tetCount * edgePairs.length;
-      const needed = lineCount * 2 * 3;
+      const needed = body.edgeCount * 2 * 3;
       if (!lineBuffer || lineBufferCapacity < needed) {
         if (lineBuffer) lineBuffer.destroy();
         lineBuffer = device.createBuffer({ size: needed * 4, usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST });
         lineBufferCapacity = needed;
+        scratch = new Float32Array(needed);
       }
-      const data = new Float32Array(needed);
+      const data = scratch;
+      const edges = body.edges, positions = body.positions;
       let o = 0;
-      for (let i = 0; i < body.tetCount; i++) {
-        const v = [body.tets[i*4], body.tets[i*4+1], body.tets[i*4+2], body.tets[i*4+3]];
-        for (const [p, q] of edgePairs) {
-          const a = v[p], b = v[q];
-          data[o++] = body.positions[a*3]; data[o++] = body.positions[a*3+1]; data[o++] = body.positions[a*3+2];
-          data[o++] = body.positions[b*3]; data[o++] = body.positions[b*3+1]; data[o++] = body.positions[b*3+2];
-        }
+      for (let ei = 0; ei < body.edgeCount; ei++) {
+        const a = edges[ei*2], b = edges[ei*2+1];
+        data[o++] = positions[a*3]; data[o++] = positions[a*3+1]; data[o++] = positions[a*3+2];
+        data[o++] = positions[b*3]; data[o++] = positions[b*3+1]; data[o++] = positions[b*3+2];
       }
-      device.queue.writeBuffer(lineBuffer, 0, data);
+      device.queue.writeBuffer(lineBuffer, 0, data, 0, needed);
       device.queue.writeBuffer(uniformBuffer, 0, viewProj);
       passEncoder.setPipeline(pipeline);
       passEncoder.setBindGroup(0, bindGroup);
       passEncoder.setVertexBuffer(0, lineBuffer);
-      passEncoder.draw(lineCount * 2);
+      passEncoder.draw(body.edgeCount * 2);
     },
   };
 }
@@ -730,11 +822,24 @@ async function main() {
   const body = new SoftBody(mesh, { layerStiffness: layerStiffnessFn });
   console.log('Jelly mesh ready:', body.particleCount, 'particles,', body.tetCount, 'tets');
 
-  const floorRenderer = createFloorRenderer(app.device, app.format);
+  const floorY = -0.7;
+  // Spawn the bar above the floor (rest geometry's own bottom sits at floorY already) so the fall
+  // and settle are actually visible, per the plan's "falling under gravity and settling" check.
+  const spawnLift = 1.5;
+  for (let i = 1; i < body.positions.length; i += 3) {
+    body.positions[i] += spawnLift;
+    body.prevPositions[i] += spawnLift;
+  }
+
+  const floorRenderer = createFloorRenderer(app.device, app.format, floorY);
   const wireRenderer = createWireframeRenderer(app.device, app.format);
   const clock = new Clock(60);
 
-  const physicsParams = { firmness: 0.5, damping: 0.5, gravity: [0, -9.8, 0], floorY: -0.7, substeps: 10 };
+  const physicsParams = { firmness: 0.5, damping: 0.5, gravity: [0, -9.8, 0], floorY, substeps: 10 };
+
+  // Debug handle for manual slider-extreme checks (console-driven, until the Phase 5 UI sliders
+  // exist) — the plan's own Task 1.4 verification step needs this to reach physicsParams.
+  window.__jelly = { body, physicsParams, clock };
 
   function physicsStep(dt) {
     const subDt = dt / physicsParams.substeps;
