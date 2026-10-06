@@ -77,9 +77,7 @@
   .swatches { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 12px; }
   .swatch { background: none; border: 1px solid transparent; padding: 6px 6px 7px; cursor: pointer; text-align: left; }
   .swatch .chip { display: flex; flex-direction: column; height: 30px; border: 1px solid var(--line); }
-  .swatch .chip i:nth-child(1) { flex: 0 0 5px; }
-  .swatch .chip i:nth-child(2) { flex: 0 0 5px; }
-  .swatch .chip i:nth-child(3) { flex: 1; }
+  .swatch .chip i { flex: 1; }
   .swname { display: block; margin-top: 7px; font: italic 13px/1 var(--serif); color: var(--muted); }
   .swatch[aria-checked="true"] { border-color: var(--line-strong); }
   .swatch[aria-checked="true"] .swname { color: var(--ink); }
@@ -1423,10 +1421,11 @@ struct U {
   skin: vec4f,
   stripe: vec4f,
   seed: vec4f,
-  shape: vec4f,      // T, Ro, skinDepth, paleDepth
+  shape: vec4f,      // T, milky seam half-width, seam 1 height, seam 2 height
   misc: vec4f,       // exposure, meshAlpha, floorY, unused
   bg: vec4f,
   shadowTint: vec4f,
+  layers: array<vec4f, 6>, // band colours, bottom → top (linear)
 };
 
 const PI = 3.14159265;
@@ -1716,26 +1715,26 @@ fn toUV(p: vec3f) -> vec2f {
   let key = u.keyDir.w;
   let NdV = max(dot(N, V), 1e-3);
 
-  // ── material regions from rest-space coordinates (they deform with the body) ──
+  // ── material: six colour bands by rest-space height (they deform and get cut with the body) ──
   let Q = i.rest;
-  let T = u.shape.x; let Ro = u.shape.y;
-  let r = length(Q.xz);
-  let th = atan2(Q.x, Q.z);
-  let wob = (fbm(vec3f(th * 9.0, Q.y * 3.0, 1.7)) - 0.5);
-  let depth = Ro - r + wob * 0.018;
-  let skinW = 1.0 - smoothstep(u.shape.z - 0.008, u.shape.z + 0.01, depth);
-  let paleEdge = u.shape.w + wob * 0.035;
-  let paleW = (1.0 - smoothstep(paleEdge - 0.035, paleEdge + 0.035, depth)) * (1.0 - skinW);
-  let fleshW = 1.0 - skinW - paleW;
-
-  // irregular stripes running across the rind, pole to pole
-  let sn = fbm(vec3f(th * 5.0, Q.y * 2.2, 3.0));
-  let stripeF = sin(th * 34.0 + sn * 7.0 + fbm(vec3f(th * 22.0, Q.y * 7.0, 9.0)) * 2.5);
-  let stripe = smoothstep(-0.05, 0.35, stripeF) * smoothstep(0.1, 0.02, depth);
-  let speck = smoothstep(0.62, 0.8, vnoise(vec3f(th * 160.0, Q.y * 40.0, 2.0)));
-  var skinCol = mix(u.skin.rgb, u.stripe.rgb, clamp(stripe + speck * 0.35, 0.0, 1.0));
-  // the cut face shows a lighter green inner skin band
-  skinCol = mix(skinCol, mix(u.skin.rgb, u.pale.rgb, 0.35), smoothstep(0.02, 0.07, depth) * 0.6);
+  let T = u.shape.x;
+  // a hand-poured wobble in the band boundaries, so the stripes read as set jelly, not ruled lines
+  let wob = (fbm(vec3f(Q.x * 2.1, 3.7, Q.z * 2.1)) - 0.5) * 0.014;
+  let yq = Q.y + wob;
+  let yb = clamp(yq / T, 0.0, 0.99999) * 6.0;
+  let i0 = u32(floor(yb));
+  let fb = yb - floor(yb);
+  let kb = 0.05;   // soft boundary, in band units
+  var layerCol = u.layers[i0].rgb;
+  if (fb > 1.0 - kb && i0 < 5u) {
+    layerCol = mix(u.layers[i0].rgb, u.layers[i0 + 1u].rgb, (fb - (1.0 - kb)) / (2.0 * kb));
+  } else if (fb < kb && i0 > 0u) {
+    layerCol = mix(u.layers[i0 - 1u].rgb, u.layers[i0].rgb, 0.5 + fb / (2.0 * kb));
+  }
+  // thin milky panna-cotta seams between every second band (the melon's pale layer, repurposed)
+  let dSeam = min(abs(yq - u.shape.z), abs(yq - u.shape.w));
+  let paleW = 1.0 - smoothstep(u.shape.y * 0.6, u.shape.y * 1.2, dSeam);
+  let fleshW = 1.0 - paleW;
 
   // ── thickness along the view ray ──
   let uv = i.pos.xy * u.screen.zw;
@@ -1747,20 +1746,19 @@ fn toUV(p: vec3f) -> vec2f {
   let thick = clamp((min(bz, sz) - fz) / cosv, 0.0, 3.0);
   let thickBack = clamp((bz - fz) / cosv, 0.0, 3.0);
 
-  // internal texture: soft crystalline grain radiating from the heart of the melon
-  let grain = fbm(vec3f(r * 26.0, th * 18.0, Q.y * 14.0));
+  // internal texture: a faint set-gel grain
+  let grain = fbm(Q * vec3f(9.0, 14.0, 9.0));
   let grain2 = vnoise(Q * 55.0);
   let dens = 1.0 + (grain - 0.5) * 0.5 + (grain2 - 0.5) * 0.18;
 
-  // ── absorption / scattering coefficients per material ──
-  let fleshT = clamp(u.flesh.rgb, vec3f(0.002), vec3f(0.999));
-  let sigF = -log(fleshT) * 3.4 * dens;
+  // ── absorption / scattering: Beer–Lambert with each layer's own colour, milky seams scatter ──
+  let layerT = clamp(layerCol, vec3f(0.002), vec3f(0.999));
+  let sigF = -log(layerT) * 3.4 * dens;
   let paleT = clamp(u.pale.rgb, vec3f(0.01), vec3f(0.999));
   let sigP = -log(paleT) * 2.0 + vec3f(0.5);
-  let sigS = -log(clamp(u.skin.rgb, vec3f(0.002), vec3f(0.99))) * 3.5 + vec3f(2.0);
-  let sigma = sigF * fleshW + sigP * paleW + sigS * skinW;
-  let scatK = 1.7 * fleshW + 4.5 * paleW + 26.0 * skinW;
-  let rough = mix(mix(0.1, 0.2, paleW), 0.14 + stripe * 0.04, skinW);
+  let sigma = sigF * fleshW + sigP * paleW;
+  let scatK = 1.7 * fleshW + 4.5 * paleW;
+  let rough = mix(0.1, 0.2, paleW);
 
   // ── refraction: bend the view ray into the jelly, find where it leaves ──
   let ior = 1.42;
@@ -1790,17 +1788,18 @@ fn toUV(p: vec3f) -> vec2f {
   let NdL = dot(N, L);
   let wrap = clamp((NdL + 0.6) / 1.6, 0.0, 1.0);
   let amb = u.bg.rgb * mix(0.3, 0.75, N.y * 0.5 + 0.5);
-  // flesh brightens toward the rind, as in a real melon
-  let nearPale = 1.0 - smoothstep(u.shape.w, u.shape.w + 0.3, depth);
-  let fleshAlb = mix(u.fleshDeep.rgb, u.flesh.rgb * 0.9, nearPale * 0.45);
-  let albedo = fleshAlb * fleshW + u.pale.rgb * 0.7 * paleW + skinCol * skinW;
+  // each band brightens a little toward the milky seams
+  let nearPale = 1.0 - smoothstep(u.shape.y, u.shape.y + 0.12, dSeam);
+  let layerDeep = layerCol * mix(vec3f(0.42), vec3f(0.62), layerCol);
+  let layerAlb = mix(layerDeep, layerCol * 0.9, nearPale * 0.45);
+  let albedo = layerAlb * fleshW + u.pale.rgb * 0.7 * paleW;
   let inner = albedo * (amb + vec3f(1.0, 0.97, 0.92) * key * 0.45 * wrap);
 
   // thin edges glow when the key light is behind them
   let back = pow(clamp(dot(V, -L), 0.0, 1.0), 3.0) * 1.4 + 0.25;
   let thinK = exp(-sigma * (pathL * 0.6 + 0.05));
-  let glowTint = u.flesh.rgb * fleshW + vec3f(0.9, 0.95, 0.78) * paleW + skinCol * 0.6 * skinW;
-  let glow = glowTint * thinK * back * key * 0.42 * (1.0 - skinW * 0.7) * clamp(1.0 - NdL * 0.6, 0.0, 1.0);
+  let glowTint = layerCol * fleshW + vec3f(0.95, 0.93, 0.86) * paleW;
+  let glow = glowTint * thinK * back * key * 0.42 * clamp(1.0 - NdL * 0.6, 0.0, 1.0);
 
   // ── assemble body color ──
   var body = transmitted * (1.0 - scat) + inner * scat + glow;
@@ -1812,11 +1811,11 @@ fn toUV(p: vec3f) -> vec2f {
   body += vec3f(1.0, 0.85, 0.8) * spark * 0.2;
 
   // ── surface: Fresnel reflection of the studio + key highlight ──
-  let F0 = mix(0.034, 0.045, skinW);
+  let F0 = 0.036;
   let F = F0 + (1.0 - F0) * pow(1.0 - NdV, 5.0);
   let env = studioEnv(R, rough, u.bg.rgb);
   let spec = ggx(N, V, L, rough) * key * vec3f(1.0, 0.97, 0.93);
-  var col = body * (1.0 - F) + env * F + spec * mix(0.9, 1.1, skinW) * (F0 / 0.04);
+  var col = body * (1.0 - F) + env * F + spec * 0.95 * (F0 / 0.04);
 
   return vec4f(col, 1.0);
 }
@@ -1924,7 +1923,7 @@ const M4 = {
 };
 
 const MSAA = 4;
-const UBO_SIZE = 544;
+const UBO_SIZE = 640;
 
 class Renderer {
   static async create(canvas, mesh, simEdges, nParticles) {
@@ -2167,6 +2166,7 @@ class Renderer {
     u.set([params.exposure, params.meshAlpha, 0, 0], 124);
     u.set([...params.bg, 1], 128);
     u.set([...palette.shadowTint, 1], 132);
+    for (let k = 0; k < 6; k++) u.set([...palette.layers[k], 1], 136 + 4 * k);
     this.device.queue.writeBuffer(this.ubo, 0, u);
     this.device.queue.writeBuffer(this.lightUbo, 0, light.lightVP);
     this.device.queue.writeBuffer(this.topUbo, 0, light.topVP);
@@ -2287,29 +2287,22 @@ const srgbToLin = c => (c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055,
 const linToSrgb = c => (c <= 0.0031308 ? c * 12.92 : 1.055 * Math.pow(c, 1 / 2.4) - 0.055);
 const hex = rgb => '#' + rgb.map(c => Math.round(Math.min(1, Math.max(0, linToSrgb(c))) * 255).toString(16).padStart(2, '0')).join('');
 
-// three coordinated varieties (linear RGB)
+// three coordinated varieties: six bands each, bottom → top (authored in sRGB hex, stored linear)
+const hexLin = h => [1, 3, 5].map(i => srgbToLin(parseInt(h.slice(i, i + 2), 16) / 255));
+function variety(name, bands, pale, shadowTint, accent) {
+  const layers = bands.map(hexLin);
+  return {
+    name, layers,
+    // legacy uniform slots the melon used; kept filled so the uniform layout is unchanged
+    flesh: layers[5], fleshDeep: layers[5].map(c => c * 0.45), skin: layers[0], stripe: layers[0].map(c => c * 0.3),
+    pale: hexLin(pale), seed: [0.01, 0.0065, 0.005], shadowTint,
+    ui: { flesh: hexLin(accent) },
+  };
+}
 const PALETTES = {
-  crimson: {
-    name: 'Crimson',
-    flesh: [0.93, 0.07, 0.11], fleshDeep: [0.42, 0.018, 0.035],
-    pale: [0.8, 0.86, 0.62], skin: [0.03, 0.13, 0.035], stripe: [0.005, 0.034, 0.01],
-    seed: [0.01, 0.0065, 0.005], shadowTint: [0.6, 0.47, 0.46],
-    ui: { flesh: [0.62, 0.03, 0.06] },
-  },
-  golden: {
-    name: 'Golden',
-    flesh: [0.97, 0.52, 0.05], fleshDeep: [0.6, 0.24, 0.012],
-    pale: [0.84, 0.88, 0.64], skin: [0.04, 0.15, 0.03], stripe: [0.007, 0.04, 0.01],
-    seed: [0.012, 0.008, 0.005], shadowTint: [0.64, 0.55, 0.44],
-    ui: { flesh: [0.72, 0.3, 0.02] },
-  },
-  rose: {
-    name: 'Rosé',
-    flesh: [0.95, 0.2, 0.3], fleshDeep: [0.6, 0.08, 0.15],
-    pale: [0.84, 0.9, 0.72], skin: [0.06, 0.2, 0.1], stripe: [0.012, 0.06, 0.03],
-    seed: [0.014, 0.009, 0.007], shadowTint: [0.64, 0.5, 0.52],
-    ui: { flesh: [0.72, 0.16, 0.24] },
-  },
+  rainbow: variety('Rainbow', ['#7B3FE4', '#2F7BFF', '#2BC46B', '#FFD23F', '#FF8A2A', '#FF3D6E'], '#F1ECDF', [0.56, 0.5, 0.6], '#C2185B'),
+  neon: variety('Neon', ['#8A1CFF', '#0094FF', '#00E676', '#FFF200', '#FF6D00', '#FF1062'], '#F4F1E6', [0.5, 0.46, 0.62], '#D5006D'),
+  pastel: variety('Pastel', ['#BFA8F0', '#A4C8FF', '#A8E6C1', '#FFEAA0', '#FFC8A0', '#FFADC2'], '#FBF7EE', [0.66, 0.6, 0.66], '#B0577A'),
 };
 
 const BG_SRGB = [0.886, 0.875, 0.855]; // #E2DFDA — the studio sweep
@@ -2354,14 +2347,14 @@ async function main() {
   let bodyTriEnd = renderMesh.body.count;
   let vComp = renderMesh.vComp;
 
-  let currentPalette = 'crimson';
+  let currentPalette = 'rainbow';
   const swatches = $('#swatches');
   for (const [key, p] of Object.entries(PALETTES)) {
     const b = document.createElement('button');
     b.type = 'button'; b.className = 'swatch'; b.dataset.key = key;
     b.setAttribute('role', 'radio');
     b.setAttribute('aria-label', p.name + ' variety');
-    b.innerHTML = `<span class="chip"><i style="background:${hex(p.skin)}"></i><i style="background:${hex(p.pale.map(c => c * 0.95))}"></i><i style="background:${hex(p.ui.flesh)}"></i></span><span class="swname">${p.name}</span>`;
+    b.innerHTML = `<span class="chip">${[...p.layers].reverse().map(c => `<i style="background:${hex(c)}"></i>`).join('')}</span><span class="swname">${p.name}</span>`;
     b.addEventListener('click', () => setPalette(key));
     swatches.appendChild(b);
   }
@@ -2370,7 +2363,7 @@ async function main() {
     for (const b of swatches.children) b.setAttribute('aria-checked', String(b.dataset.key === key));
     document.documentElement.style.setProperty('--accent', hex(PALETTES[key].ui.flesh));
   }
-  setPalette('crimson');
+  setPalette('rainbow');
 
   let renderer;
   try {
@@ -3020,7 +3013,7 @@ async function main() {
       canvas.dataset.cursor = state.tool === 'knife' ? 'knife' : !state.paused && (pick(rayFrom(hoverX, hoverY)) || pickNear(hoverX, hoverY, 18)) ? 'grab' : '';
     }
     renderer.setUniforms(cam, light, PALETTES[currentPalette], {
-      time: state.time, shape: [SHAPE.T, 99, 0.075, 0.25],
+      time: state.time, shape: [SHAPE.T, MILKY_HALF, MILKY_SEAMS[0] * SHAPE.T, MILKY_SEAMS[1] * SHAPE.T],
       exposure: 1.0, meshAlpha: state.showMesh ? 0.32 : 0, bg: BG_RENDER,
     });
     renderer.uploadGeometry(sim.x, state.showMesh);
