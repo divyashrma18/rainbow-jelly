@@ -1,5 +1,5 @@
-<!doctype html><html><head><meta charset=utf8><meta name=viewport content="width=device-width,initial-scale=1,viewport-fit=cover"><style>:root{color-scheme:light;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}html{scroll-padding-top:env(safe-area-inset-top,0px)}body{margin:0;padding:0;font:14px -apple-system,BlinkMacSystemFont,sans-serif;background:#faf9f5;color:#141413}img{max-width:100%}[hidden]:not([hidden=until-found i]){display:none!important}</style></head><body>
-<title>Melon Jelly Knife (Copy)</title>
+<!doctype html><html><head><meta charset=utf8><meta name=viewport content="width=device-width,initial-scale=1,viewport-fit=cover"><style>:root{color-scheme:light;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}html{scroll-padding-top:env(safe-area-inset-top,0px)}body{margin:0;padding:0;font:14px -apple-system,BlinkMacSystemFont,sans-serif;background:#faf9f5;color:#141413}img{max-width:100%}[hidden]:not([hidden=until-found i]){display:none!important}</style><link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 6 6'%3E%3Cpath fill='%23FF3D6E' d='M0 0h6v1H0z'/%3E%3Cpath fill='%23FF8A2A' d='M0 1h6v1H0z'/%3E%3Cpath fill='%23FFD23F' d='M0 2h6v1H0z'/%3E%3Cpath fill='%232BC46B' d='M0 3h6v1H0z'/%3E%3Cpath fill='%232F7BFF' d='M0 4h6v1H0z'/%3E%3Cpath fill='%237B3FE4' d='M0 5h6v1H0z'/%3E%3C/svg%3E"></head><body>
+<title>Rainbow Jelly</title>
 <style>
   :root {
     --bg: #E2DFDA;
@@ -118,6 +118,7 @@
   .stats dd { margin: 0; font: 20px/1 var(--mono); font-variant-numeric: tabular-nums; letter-spacing: -.02em; }
   .stats dd small { font: 11px/1 var(--sans); color: var(--muted); letter-spacing: .02em; margin-left: 3px; }
   .footnote { margin: 9px 0 0; font-size: 11px; color: var(--faint); max-width: 400px; }
+  .footnote.credit { margin-top: 6px; font: italic 12px/1.4 var(--serif); color: var(--muted); }
 
   /* ── notes ── */
   .notes { position: fixed; right: var(--gutter); bottom: var(--gutter); width: 300px; border: 1px solid var(--line); background: rgba(226, 223, 218, .9); }
@@ -173,7 +174,7 @@
   }
 </style>
   <div class="stage" id="stage">
-    <canvas id="gl" aria-label="Interactive 3D watermelon jelly slice. Drag it to stretch it, or switch to the knife and draw across it to cut it into pieces." role="img"></canvas>
+    <canvas id="gl" aria-label="Interactive 3D six-layer rainbow jelly bar. Drag it to stretch it, or switch to the knife and draw across it to cut it into pieces." role="img"></canvas>
     <svg class="stroke" id="stroke" aria-hidden="true"><line id="strokeLine" x1="0" y1="0" x2="0" y2="0"/></svg>
     <div class="toast" id="toast" role="status" aria-live="polite"></div>
     <div class="fallback" id="fallback" hidden>
@@ -186,15 +187,15 @@
   </div>
 
   <header class="masthead">
-    <div class="kicker">Material Studies / No. 009</div>
-    <h1><span>Melon</span><span>Jelly.</span></h1>
-    <p class="caption">A slice of summer.<br>A little wobble.<br>Too soft to share.</p>
+    <div class="kicker">Material Studies / No. 010</div>
+    <h1><span>Rainbow</span><span>Jelly.</span></h1>
+    <p class="caption">Six flavours.<br>One wobble.<br>Zero regrets.</p>
   </header>
 
   <div class="status" id="status" data-state="idle" role="status" aria-live="polite"><span class="dot" aria-hidden="true"></span><span id="statusText">WEBGPU · STARTING</span></div>
 
   <aside class="panel" aria-label="Specimen controls">
-    <header><span class="label">The Specimen</span><span>fig. 9</span></header>
+    <header><span class="label">The Specimen</span><span>fig. 10</span></header>
     <div class="group">
       <span class="label">Tool</span>
       <div class="tools" role="group" aria-label="Tool">
@@ -233,7 +234,7 @@
   </aside>
 
   <section class="readouts" aria-label="Live readouts">
-    <p class="hint" id="hintText"><b>Hand</b>Grab any piece — tip, corner, flesh or rind — and pull.</p>
+    <p class="hint" id="hintText"><b>Hand</b>Grab any piece — corner, edge or stripe — and pull.</p>
     <dl class="stats">
       <div><dt class="label">Mass</dt><dd>≈<span id="massOut">—</span><small>g</small></dd></div>
       <div><dt class="label">Volume</dt><dd><span id="volOut">—</span><small>% of rest</small></dd></div>
@@ -241,27 +242,30 @@
       <div><dt class="label">Pieces</dt><dd><span id="piecesOut">1</span></dd></div>
     </dl>
     <p class="footnote">Illustrative scale: 1 sim unit ≈ 3.5 cm, gummy at 1.3 g/cm³. Volume and energy are summed live over every tetrahedron and particle.</p>
+    <p class="footnote credit">Remixed from Melon Jelly by Abraham John.</p>
   </section>
 
   <details class="notes">
     <summary><span class="label">Inside the experiment</span></summary>
     <div class="body">
-      <h3>A body made of tetrahedra</h3>
-      <p>The slice is a volumetric mesh of <span class="num" id="nParticles">—</span> particles and <span class="num" id="nTets">—</span> tetrahedra, solved with XPBD on a fixed 60&nbsp;Hz step split into 10 substeps. Each tetrahedron is pulled, with finite compliance, toward its best-fit rotated rest shape — a co-rotational elastic constraint that also flips inverted elements back out — and carries a volume constraint that keeps the jelly close to incompressible, so a stretched slice necks in like the real thing.</p>
-      <p>Tetrahedra in the rind are roughly three times stiffer than the flesh. Damping acts only on relative velocity along the mesh edges, so the slice still falls and tumbles freely while its wobble dies away. Ground contact projects particles out of the floor with Coulomb-style friction; the grab is a soft attachment on a patch of particles, bounded in reach.</p>
-      <h3>Cutting</h3>
-      <p>Every piece is a convex outline in the slice’s original rest plane, with rounded corners. Your stroke, read on the surface it was drawn over, fixes a vertical blade plane. For each piece it crosses, the piece’s current pose is fitted with a best rotation, the plane is carried back into rest space and becomes a straight line, and the outline is split along it — the two halves are prebuilt as fresh tetrahedral meshes the moment you let go. Then the steel knife comes down: its edge first presses a groove into the jelly, and when it breaks through the new pieces are swapped in, taking over the position and speed of the flesh they came from, while the blade wedges the faces apart on its way to the board. The blade is drawn behind the jelly surface, so the part that is buried in it is seen refracted. Each piece is its own soft body — grab it, stretch it, cut it again — and pieces push against each other instead of passing through.</p>
-      <h3>A surface that rides along</h3>
-      <p>The smooth surface, the seeds and the air bubbles are separate meshes, each vertex pinned to a tetrahedron by barycentric weights — so the seeds stretch, turn and travel with the flesh around them.</p>
+      <h3>Six layers, one body</h3>
+      <p>The bar is a single volumetric mesh of <span class="num" id="nParticles">—</span> particles and <span class="num" id="nTets">—</span> tetrahedra, stepped with XPBD at a fixed 60&nbsp;Hz in 10 substeps. Every tetrahedron is pulled, with finite compliance, toward the best-fitting rotation of its rest shape, and a volume constraint keeps the gel nearly incompressible — pull one end and the middle thins out, the way a real set jelly does.</p>
+      <p>The six flavours are poured by height. Each tetrahedron takes its stiffness from where it sat in the mould: the violet base is firmest, every layer above it is a little looser, and the pink-red top is the softest of all, so a shove makes the bar shear in visible tiers. The two milky panna-cotta seams are slightly stiffer than the jelly around them. Damping only acts on relative motion along mesh edges, so the bar still tumbles freely while the wobble dies down.</p>
+      <h3>Stripes that survive the knife</h3>
+      <p>Colour is never painted onto a piece. Every surface point remembers where it sat in the uncut bar, and the shader picks its band from that rest-space height — so the stripes stretch with the jelly and appear, perfectly lined up, on every fresh cut face. A cut fits each piece’s current pose, carries your stroke back into rest space as a straight line, splits the outline and prebuilds the two halves; the steel blade then presses a groove, breaks through, and the new pieces take over the motion of the gel they came from.</p>
+      <h3>Bubbles and a signature</h3>
+      <p>A scatter of tiny air bubbles is trapped through all six layers, each one pinned to a tetrahedron by barycentric weights so it squashes and travels with the gel around it. The handle on the top is not geometry: it is a soft height map in rest space, turned into a bump on the surface normal, so the letters stretch when you pull and split cleanly between pieces when you cut through them.</p>
       <h3>Light through jelly</h3>
-      <p>WGSL shaders render the floor, seeds and bubbles first, then the slice’s back faces to measure how much jelly each view ray crosses. The front faces refract the scene behind by that thickness, absorb it with Beer–Lambert colour, add milky scattering in the pale layer, a back-lit glow at thin edges, Fresnel reflections of a procedural studio and GGX highlights. The floor gets a soft key shadow tinted by the jelly plus contact occlusion from a top-down height map.</p>
+      <p>WGSL shaders draw the back faces first to measure how much gel each view ray crosses, then refract the scene through the front faces and absorb it with Beer–Lambert colour taken from each layer’s own hue. The milky seams scatter instead of tint, thin edges glow when back-lit, and Fresnel reflections and GGX highlights come from a procedural studio. The floor gets a jelly-tinted shadow and contact occlusion from a top-down height map.</p>
+      <h3>Sound</h3>
+      <p>Everything you hear is synthesised live with Web Audio — no recordings. Grabbing and letting go give a wet squish that grows with how far you pulled; the knife breaking through gives a low thwack and a slurp; pieces that land or bump each other give a soft bloop scaled by the impact. Audio starts only after your first touch, and ¼ speed drops the pitch to match.</p>
     </div>
   </details>
 
 <script type="module">
 // ===== geometry.js =====
 // ─────────────────────────────────────────────────────────────
-//  Geometry: rounded watermelon wedge, tetrahedral sim mesh,
+//  Geometry: rounded rainbow bar, tetrahedral sim mesh,
 //  smooth render surface, seeds and bubbles, and the barycentric
 //  embedding that ties every render vertex to a tetrahedron.
 // ─────────────────────────────────────────────────────────────
@@ -2736,13 +2740,13 @@ async function main() {
       const p = pick(rayFrom(ax + (bx - ax) * t, ay + (by - ay) * t));
       if (p && lastPickTri >= 0) { hit.add(vComp[index[lastPickTri]]); yTop = Math.max(yTop, p[1]); if (t0 < 0) t0 = t; t1 = t; }
     }
-    if (!hit.size) return { miss: 'Missed — draw the blade across the slice.' };
-    if (pieces.length + hit.size > MAX_PIECES) return { miss: 'That’s plenty of pieces. Reset to start a fresh slice.' };
+    if (!hit.size) return { miss: 'Missed — draw the blade across the bar.' };
+    if (pieces.length + hit.size > MAX_PIECES) return { miss: 'That’s plenty of pieces. Reset for a fresh bar.' };
     // the stroke as seen on the surface it was drawn over
     const at = t => rayPlaneY(rayFrom(ax + (bx - ax) * t, ay + (by - ay) * t), yTop);
     const A = at(0) || at(t0), B = at(1) || at(t1);
     const A2 = at(t0), B2 = at(t1);
-    if (!A || !B || !A2 || !B2) return { miss: 'Missed — draw the blade across the slice.' };
+    if (!A || !B || !A2 || !B2) return { miss: 'Missed — draw the blade across the bar.' };
     let dx = B[0] - A[0], dz = B[2] - A[2];
     const dl = Math.hypot(dx, dz); if (dl < 0.05) return { miss: '' };
     dx /= dl; dz /= dl;
@@ -2775,7 +2779,7 @@ async function main() {
         next.push({ I, cache: null });
       });
     });
-    if (!cut) return { miss: thin ? 'Too thin to cut there.' : 'Missed — draw the blade across the slice.' };
+    if (!cut) return { miss: thin ? 'Too thin to cut there.' : 'Missed — draw the blade across the bar.' };
     // do the expensive part now, while the knife is still in the air
     const w = buildWorld(next);
     const ns = new SoftBody(w.sim, { firmness: sim.firmness, damping: sim.damping });
@@ -3090,8 +3094,8 @@ async function main() {
     document.body.dataset.tool = t;
     canvas.dataset.cursor = t === 'knife' ? 'knife' : '';
     hint.innerHTML = t === 'knife'
-      ? '<b>Knife</b>Draw a line across the slice — the knife lines up over it and cuts when you let go. Cut the pieces again, as small as you like.'
-      : '<b>Hand</b>Grab any piece — tip, corner, flesh or rind — and pull. Scroll, or add a second finger, while holding to twist it.';
+      ? '<b>Knife</b>Draw a line across the bar — the knife lines up over it and cuts when you let go. Cut the pieces again, as small as you like.'
+      : '<b>Hand</b>Grab any piece — corner, edge or stripe — and pull. Scroll, or add a second finger, while holding to twist it.';
   }
   for (const b of document.querySelectorAll('.tool')) b.addEventListener('click', () => setTool(b.dataset.tool));
   setTool('hand');
